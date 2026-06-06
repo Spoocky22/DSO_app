@@ -11,6 +11,16 @@ function uid() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
 }
 
+
+function normalizeRedshiftOverride(redshift: number | null): number | null {
+  if (redshift === null) return null
+  const n = Number(redshift)
+  if (!Number.isFinite(n) || n <= -0.1 || n >= 20) {
+    throw new Error("Le redshift manuel doit être un nombre compris entre -0.1 et 20")
+  }
+  return n
+}
+
 function normalizePanelCount(panelCount: number): number {
   const n = Math.trunc(Number(panelCount))
   if (!Number.isFinite(n) || n < 1 || n > MAX_PANEL_COUNT) {
@@ -30,6 +40,7 @@ export async function getState(): Promise<AppState> {
       id: t.id,
       name: t.name,
       panelCount: t.panelCount ?? 1,
+      redshiftOverride: t.redshiftOverride ?? null,
       createdAt: t.createdAt.getTime(),
     })),
     sessions: sessionRows.map((s) => ({
@@ -92,5 +103,17 @@ export async function deleteSession(id: string): Promise<void> {
 export async function deleteTarget(id: string): Promise<void> {
   if (!id) throw new Error("Cible requise")
   await db.delete(targets).where(eq(targets.id, id))
+  revalidatePath("/")
+}
+
+export async function updateTargetRedshiftOverride(id: string, redshift: number | null): Promise<void> {
+  if (!id) throw new Error("Cible requise")
+  const normalized = normalizeRedshiftOverride(redshift)
+
+  await db
+    .update(targets)
+    .set({ redshiftOverride: normalized })
+    .where(eq(targets.id, id))
+
   revalidatePath("/")
 }

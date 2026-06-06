@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS targets (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   panel_count INTEGER NOT NULL DEFAULT 1 CHECK (panel_count BETWEEN 1 AND 20),
+  redshift_override DOUBLE PRECISION CHECK (redshift_override IS NULL OR (redshift_override > -0.1 AND redshift_override < 20)),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

@@ -1,9 +1,10 @@
-import { integer, pgTable, text, timestamp } from "drizzle-orm/pg-core"
+import { doublePrecision, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core"
 
 export const targets = pgTable("targets", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   panelCount: integer("panel_count").notNull().default(1),
+  redshiftOverride: doublePrecision("redshift_override"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })
 

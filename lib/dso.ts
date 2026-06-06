@@ -29,6 +29,7 @@ export interface Target {
   id: string
   name: string
   panelCount: number // nombre de panneaux / pano de la cible
+  redshiftOverride: number | null // correction manuelle éventuelle du redshift Wikidata
   createdAt: number
 }
 

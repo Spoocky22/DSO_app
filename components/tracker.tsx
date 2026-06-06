@@ -12,6 +12,7 @@ import {
   addSession as addSessionAction,
   deleteSession as deleteSessionAction,
   deleteTarget as deleteTargetAction,
+  updateTargetRedshiftOverride as updateTargetRedshiftOverrideAction,
 } from "@/app/actions/tracker"
 import { TargetSelector } from "@/components/target-selector"
 import { ObjectPreview } from "@/components/object-preview"
@@ -91,6 +92,19 @@ export function Tracker() {
       await mutate()
     } catch (err) {
       setActionError(readableError(err))
+    }
+  }
+
+
+  async function handleUpdateTargetRedshiftOverride(redshift: number | null) {
+    if (!effectiveSelectedId) return
+    setActionError(null)
+    try {
+      await updateTargetRedshiftOverrideAction(effectiveSelectedId, redshift)
+      await mutate()
+    } catch (err) {
+      setActionError(readableError(err))
+      throw err
     }
   }
 
@@ -184,7 +198,11 @@ export function Tracker() {
           onDelete={handleDeleteTarget}
         />
 
-        <ObjectPreview targetName={selectedTarget?.name ?? null} />
+        <ObjectPreview
+          targetName={selectedTarget?.name ?? null}
+          redshiftOverride={selectedTarget?.redshiftOverride ?? null}
+          onRedshiftOverrideChange={handleUpdateTargetRedshiftOverride}
+        />
 
         <Dashboard
           sessions={targetSessions}
