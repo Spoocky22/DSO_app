@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: dso_app_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dso
+      POSTGRES_PASSWORD: dso
+      POSTGRES_DB: dso
+    ports:
+      - "5432:5432"
+    volumes:
+      - dso_postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dso -d dso"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  dso_postgres_data:
