@@ -1,41 +1,50 @@
 "use client"
 
-import { useState } from "react"
-import { FILTERS, FILTER_COLORS, formatDuration, type FilterType } from "@/lib/dso"
+import { useEffect, useState } from "react"
+import { FILTERS, FILTER_COLORS, formatDuration, panelLabel, type FilterType } from "@/lib/dso"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
-import { Plus, Loader2 } from "lucide-react"
+import { Plus, Loader2, Grid2X2 } from "lucide-react"
 
 interface Props {
   disabled?: boolean
+  panelCount: number
   onSubmit: (data: {
+    panelIndex: number
     filter: FilterType
     subExposure: number
     subCount: number
   }) => Promise<void> | void
 }
 
-export function SessionForm({ disabled, onSubmit }: Props) {
+export function SessionForm({ disabled, panelCount, onSubmit }: Props) {
+  const [panelIndex, setPanelIndex] = useState(1)
   const [filter, setFilter] = useState<FilterType>("L")
   const [subExposure, setSubExposure] = useState("300")
   const [subCount, setSubCount] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
+  const safePanelCount = Math.max(1, panelCount || 1)
+
+  useEffect(() => {
+    if (panelIndex > safePanelCount) setPanelIndex(1)
+  }, [panelIndex, safePanelCount])
+
   const exp = Number(subExposure) || 0
   const count = Number(subCount) || 0
   const preview = exp * count
 
-  const valid = exp > 0 && count > 0
+  const valid = exp > 0 && count > 0 && panelIndex >= 1 && panelIndex <= safePanelCount
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!valid || submitting) return
     setSubmitting(true)
     try {
-      await onSubmit({ filter, subExposure: exp, subCount: count })
+      await onSubmit({ panelIndex, filter, subExposure: exp, subCount: count })
       setSubCount("")
     } finally {
       setSubmitting(false)
@@ -48,6 +57,35 @@ export function SessionForm({ disabled, onSubmit }: Props) {
         AJOUTER UNE SESSION
       </h2>
       <form onSubmit={handleSubmit} className="space-y-4">
+        {safePanelCount > 1 && (
+          <div className="space-y-1.5">
+            <Label className="flex items-center gap-2">
+              <Grid2X2 className="size-3.5 text-primary" />
+              Panneau / pano
+            </Label>
+            <div className="grid grid-cols-4 gap-2">
+              {Array.from({ length: safePanelCount }, (_, i) => i + 1).map((p) => {
+                const active = p === panelIndex
+                return (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => setPanelIndex(p)}
+                    className={cn(
+                      "rounded-lg border px-3 py-2 text-xs font-semibold transition-colors",
+                      active
+                        ? "border-primary bg-primary/15 text-primary"
+                        : "border-border bg-card text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {panelLabel(p)}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
         <div className="space-y-1.5">
           <Label>Filtre</Label>
           <div className="flex flex-wrap gap-2">
@@ -103,7 +141,7 @@ export function SessionForm({ disabled, onSubmit }: Props) {
 
         {preview > 0 && (
           <p className="text-xs text-muted-foreground">
-            Temps de cette session :{" "}
+            Temps de cette session{safePanelCount > 1 ? ` sur ${panelLabel(panelIndex)}` : ""} :{" "}
             <span className="font-semibold text-primary">
               {formatDuration(preview)}
             </span>

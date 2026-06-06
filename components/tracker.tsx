@@ -55,10 +55,10 @@ export function Tracker() {
     [state, effectiveSelectedId],
   )
 
-  async function handleAddTarget(name: string) {
+  async function handleAddTarget(name: string, panelCount: number) {
     setActionError(null)
     try {
-      const id = await addTargetAction(name)
+      const id = await addTargetAction(name, panelCount)
       setSelectedId(id)
       await mutate()
     } catch (err) {
@@ -68,6 +68,7 @@ export function Tracker() {
   }
 
   async function handleAddSession(data: {
+    panelIndex: number
     filter: FilterType
     subExposure: number
     subCount: number
@@ -130,7 +131,7 @@ export function Tracker() {
             {readableError(error)}
           </pre>
           <p className="text-xs text-muted-foreground">
-            Vérifie que <code>.env.local</code> existe et que PostgreSQL tourne avec <code>docker compose up -d db</code>.
+            Vérifie que <code>DATABASE_URL</code> est bien configurée et que les tables existent dans PostgreSQL/Neon.
           </p>
         </Card>
       </main>
@@ -188,11 +189,20 @@ export function Tracker() {
         <Dashboard
           sessions={targetSessions}
           targetName={selectedTarget?.name ?? null}
+          panelCount={selectedTarget?.panelCount ?? 1}
         />
 
-        <SessionForm disabled={!effectiveSelectedId} onSubmit={handleAddSession} />
+        <SessionForm
+          disabled={!effectiveSelectedId}
+          panelCount={selectedTarget?.panelCount ?? 1}
+          onSubmit={handleAddSession}
+        />
 
-        <ContributionList sessions={targetSessions} onDelete={handleDeleteSession} />
+        <ContributionList
+          sessions={targetSessions}
+          panelCount={selectedTarget?.panelCount ?? 1}
+          onDelete={handleDeleteSession}
+        />
       </div>
     </main>
   )

@@ -10,11 +10,16 @@ async function fetchSummary(lang: string, title: string) {
   const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(
     title,
   )}?redirect=true`
-  const res = await fetch(url, {
-    headers: { "User-Agent": "DSO-Exposure-Tracker/1.0 (astro team tool)" },
-    // cache côté Next pendant 24h, les images d'objets ne changent pas
-    next: { revalidate: 86400 },
-  })
+  let res: Response
+  try {
+    res = await fetch(url, {
+      headers: { "User-Agent": "DSO-Exposure-Tracker/1.0 (astro team tool)" },
+      // cache côté Next pendant 24h, les images d'objets ne changent pas
+      next: { revalidate: 86400 },
+    })
+  } catch {
+    return null
+  }
   if (!res.ok) return null
   const data = await res.json()
   if (data.type === "disambiguation") return null

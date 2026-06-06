@@ -13,9 +13,12 @@ export const FILTER_COLORS: Record<FilterType, string> = {
   SII: "oklch(0.7 0.16 320)",
 }
 
+export const MAX_PANEL_COUNT = 20
+
 export interface Session {
   id: string
   targetId: string
+  panelIndex: number // panneau / pano de mosaïque, 1 si cible simple
   filter: FilterType
   subExposure: number // secondes par pose
   subCount: number // nombre de poses conservées
@@ -25,6 +28,7 @@ export interface Session {
 export interface Target {
   id: string
   name: string
+  panelCount: number // nombre de panneaux / pano de la cible
   createdAt: number
 }
 
@@ -50,6 +54,10 @@ export function formatDuration(totalSeconds: number): string {
 
 export function sessionSeconds(session: Session): number {
   return session.subExposure * session.subCount
+}
+
+export function panelLabel(panelIndex: number): string {
+  return `P${panelIndex}`
 }
 
 export function timeAgo(ts: number): string {

@@ -3,6 +3,7 @@
 import {
   FILTER_COLORS,
   formatDuration,
+  panelLabel,
   sessionSeconds,
   timeAgo,
   type Session,
@@ -13,11 +14,13 @@ import { Trash2, History } from "lucide-react"
 
 interface Props {
   sessions: Session[]
+  panelCount: number
   onDelete: (id: string) => void
 }
 
-export function ContributionList({ sessions, onDelete }: Props) {
+export function ContributionList({ sessions, panelCount, onDelete }: Props) {
   const sorted = [...sessions].sort((a, b) => b.createdAt - a.createdAt)
+  const showPanel = (panelCount || 1) > 1
 
   return (
     <Card className="gap-0 p-4">
@@ -48,7 +51,7 @@ export function ContributionList({ sessions, onDelete }: Props) {
 
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-foreground">
-                  {s.subCount} × {s.subExposure}s
+                  {showPanel ? `${panelLabel(s.panelIndex ?? 1)} · ` : ""}{s.subCount} × {s.subExposure}s
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {timeAgo(s.createdAt)}

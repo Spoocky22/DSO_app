@@ -11,7 +11,11 @@ interface ImageData {
   pageUrl?: string
 }
 
-const fetcher = (url: string) => fetch(url).then((r) => r.json())
+const fetcher = async (url: string): Promise<ImageData> => {
+  const response = await fetch(url)
+  if (!response.ok) return { image: null }
+  return response.json()
+}
 
 interface Props {
   targetName: string | null

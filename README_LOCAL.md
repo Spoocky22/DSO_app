@@ -1,6 +1,6 @@
 # DSO Exposure Tracker — lancement local
 
-Application Next.js / React générée par v0 pour suivre les temps de pose par cible et par filtre.
+Application Next.js / React générée par v0 pour suivre les temps de pose par cible, par filtre et par panneau de mosaïque.
 
 ## Prérequis
 
@@ -63,6 +63,23 @@ docker compose up -d db
 
 Attention : `down -v` supprime les données locales.
 
+## Migration Neon pour les mosaïques
+
+Si la base Neon existe déjà avec l'ancien schéma, exécute une fois le script suivant dans le SQL Editor Neon :
+
+```text
+db/migrations/002_panels.sql
+```
+
+Il ajoute :
+
+```text
+targets.panel_count
+sessions.panel_index
+```
+
+Les anciennes cibles et sessions restent compatibles : elles sont automatiquement considérées comme des cibles à 1 panneau.
+
 ## Commandes utiles
 
 ```bash
@@ -77,6 +94,7 @@ pnpm lint     # lint si ESLint est configuré
 - Ajout de cibles DSO.
 - Ajout de sessions d'imagerie : filtre, temps de pose unitaire, nombre de poses conservées.
 - Agrégation du temps total par cible et par filtre.
+- Gestion des cibles simples ou en mosaïque, avec temps de pose comparés panneau par panneau.
 - Liste des dernières sessions avec suppression.
 - Image et résumé Wikipédia récupérés automatiquement côté serveur.
 
@@ -85,7 +103,7 @@ pnpm lint     # lint si ESLint est configuré
 Priorité haute :
 
 1. Ajouter une vraie gestion d'erreur utilisateur pour les actions base de données.
-2. Ajouter modification/suppression des cibles.
+2. Ajouter modification des cibles, notamment le nombre de panneaux après création.
 3. Ajouter export CSV/JSON des sessions.
 4. Ajouter des objectifs par filtre, la table `goals` est déjà prévue côté base.
 5. Ajouter une sauvegarde/import local pour éviter de dépendre uniquement de PostgreSQL.
