@@ -160,16 +160,18 @@ def handle_message(config: Config, message: str) -> None:
         log(f"app returned unexpected response: {result}")
 
 
-def run_test(config: Config, target_name: str, filter_name: str, exposure_time: int) -> None:
+def run_test(config: Config, target_name: str, filter_name: str, exposure_time: int, panel_index: int) -> None:
     check_app(config)
     safe_target = target_name.strip() or "M51"
     safe_filter = filter_name.strip() or "H-alpha"
+    safe_panel = max(1, min(20, int(panel_index or 1)))
     payload = {
         "targetName": safe_target,
         "filter": safe_filter,
         "exposureTime": exposure_time,
         "subCount": 1,
-        "filename": f"{safe_target.replace(' ', '_')}_TEST_NINA_{int(time.time())}.fits",
+        "panelIndex": safe_panel,
+        "filename": f"{safe_target.replace(' ', '_')}_P{safe_panel}_TEST_NINA_{int(time.time())}.fits",
         "capturedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     result = post_to_app(config, payload)
@@ -192,12 +194,21 @@ def run_forever(config: Config) -> None:
         ws: websocket.WebSocket | None = None
         try:
             log(f"connecting to NINA websocket: {config.nina_ws_url}")
-            ws = websocket.create_connection(config.nina_ws_url, timeout=30)
+            ws = websocket.create_connection(config.nina_ws_url, timeout=10)
+            # The connection timeout above also becomes the socket read timeout.
+            # NINA may remain idle for long periods with no IMAGE-SAVE event; this
+            # must not be treated as an error. Wake up occasionally only to check
+            # whether the agent should stop.
+            ws.settimeout(300)
             log("NINA websocket: connected")
             notify(config, "DSO Sync", "Connecté au WebSocket NINA", tags="satellite,telescope")
 
             while not stop:
-                message = ws.recv()
+                try:
+                    message = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    # Normal idle period: no image was saved by NINA.
+                    continue
                 if isinstance(message, bytes):
                     message = message.decode("utf-8", errors="replace")
                 handle_message(config, message)
@@ -223,12 +234,13 @@ def main() -> int:
     parser.add_argument("--test-target", default="M51", help="target name used by --test; default: M51")
     parser.add_argument("--test-filter", default="H-alpha", help="filter name used by --test; default: H-alpha")
     parser.add_argument("--test-exposure", type=int, default=300, help="exposure time in seconds used by --test; default: 300")
+    parser.add_argument("--test-panel", type=int, default=1, help="panel index used by --test; default: 1")
     args = parser.parse_args()
 
     try:
         config = load_config()
         if args.test:
-            run_test(config, args.test_target, args.test_filter, args.test_exposure)
+            run_test(config, args.test_target, args.test_filter, args.test_exposure, args.test_panel)
         else:
             run_forever(config)
         return 0

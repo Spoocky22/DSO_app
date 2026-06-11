@@ -91,6 +91,45 @@ function normalizeTargetLookupName(name: string): string {
     .trim()
 }
 
+
+function stripPanelMarker(name: string): string {
+  return name
+    .replace(/(?:^|[\s_\-[(])(?:panel|panneau|pane|tile|mosaic|mosaique|p|pan)\s*[:#]?\s*\d{1,2}(?:[\s_\-)\]]*)$/i, "")
+    .replace(/[\s_\-[(]+(?:panel|panneau|pane|tile|mosaic|mosaique)\s*[:#]?\s*\d{1,2}(?:[\s_\-)\]]*)$/i, "")
+    .trim()
+}
+
+function detectPanelIndexFromText(...values: string[]): number | null {
+  const combined = values.filter(Boolean).join(" ")
+  const patterns = [
+    /(?:^|[\s_\-[(])(?:panel|panneau|pane|tile|mosaic|mosaique|pan)\s*[:#]?\s*(\d{1,2})(?=$|[\s_\-)\].])/i,
+    /(?:^|[\s_\-[(])p\s*[:#]?\s*(\d{1,2})(?=$|[\s_\-)\].])/i,
+  ]
+
+  for (const pattern of patterns) {
+    const match = combined.match(pattern)
+    if (match) {
+      const n = Number(match[1])
+      if (Number.isInteger(n) && n >= 1 && n <= 20) return n
+    }
+  }
+  return null
+}
+
+function detectPanelIndex(payload: IngestPayload, stats: Record<string, unknown>, targetName: string, filename: string): number {
+  const explicit =
+    asPositiveInteger(payload.panelIndex, null) ??
+    asPositiveInteger(stats.PanelIndex, null) ??
+    asPositiveInteger(stats.PanelNumber, null) ??
+    asPositiveInteger(stats.Panel, null) ??
+    asPositiveInteger(stats.TileIndex, null) ??
+    asPositiveInteger(stats.TileNumber, null)
+
+  if (explicit && explicit >= 1 && explicit <= 20) return explicit
+
+  return detectPanelIndexFromText(targetName, filename) ?? 1
+}
+
 function catalogueTokens(name: string): string[] {
   const normalized = normalizeTargetLookupName(name)
   const tokens = new Set<string>()
@@ -128,24 +167,30 @@ function isLikelyCalibrationFrame(targetName: string, filterName: string, filena
   return ["bias", "dark", "flat", "darkflat", "dark-flat", "calibration"].some((word) => combined.includes(word))
 }
 
-async function findOrCreateTarget(targetName: string) {
+async function findOrCreateTarget(targetName: string, panelIndex = 1) {
   const allTargets = await db.select().from(targets).orderBy(asc(targets.createdAt))
   const incoming = targetName.trim()
+  const cleanedIncoming = stripPanelMarker(incoming) || incoming
   const incomingNormalized = normalizeTargetLookupName(incoming)
+  const cleanedIncomingNormalized = normalizeTargetLookupName(cleanedIncoming)
 
   // 1) Match exact mais insensible à la casse, accents et ponctuation.
-  const exact = allTargets.find((t) => normalizeTargetLookupName(t.name) === incomingNormalized)
+  // On essaie aussi la version sans suffixe panneau : "M31 P2" -> "M31".
+  const exact = allTargets.find((t) => {
+    const existing = normalizeTargetLookupName(t.name)
+    return existing === incomingNormalized || existing === cleanedIncomingNormalized
+  })
   if (exact) return { target: exact, created: false }
 
   // 2) Match sûr par identifiant catalogue.
-  // Exemples : "M51 test NINA" -> "M51", "Messier 51" -> "M51", "NGC7000" -> "NGC 7000".
-  const catalogueMatch = allTargets.find((t) => sameCatalogueObject(t.name, incoming))
+  // Exemples : "M51 P2" -> "M51", "Messier 51" -> "M51", "NGC7000" -> "NGC 7000".
+  const catalogueMatch = allTargets.find((t) => sameCatalogueObject(t.name, incoming) || sameCatalogueObject(t.name, cleanedIncoming))
   if (catalogueMatch) return { target: catalogueMatch, created: false }
 
   const target = {
     id: "t-" + uid(),
-    name: incoming,
-    panelCount: 1,
+    name: cleanedIncoming,
+    panelCount: Math.max(1, Math.min(20, panelIndex || 1)),
   }
   await db.insert(targets).values(target)
   const [created] = await db.select().from(targets).where(eq(targets.id, target.id)).limit(1)
@@ -237,12 +282,12 @@ export async function POST(req: NextRequest) {
   const roundedExposureSeconds = Math.round(exposureSeconds)
   const subCount = asPositiveInteger(payload.subCount, 1) ?? 1
   const capturedAt = parseDate(stats.Date ?? payload.capturedAt) ?? new Date()
-  const panelIndex = asPositiveInteger(payload.panelIndex, 1) ?? 1
-  const externalId = asTrimmedString(payload.sourceId) || filename || `${targetName}|${filter}|${capturedAt.toISOString()}|${roundedExposureSeconds}`
+  const panelIndex = detectPanelIndex(payload, stats, targetName, filename)
+  const externalId = asTrimmedString(payload.sourceId) || filename || `${targetName}|${filter}|P${panelIndex}|${capturedAt.toISOString()}|${roundedExposureSeconds}`
 
   const existingRows = await db.select().from(sessions).where(eq(sessions.externalId, externalId)).limit(1)
   if (existingRows.length > 0) {
-    const { target } = await findOrCreateTarget(targetName)
+    const { target } = await findOrCreateTarget(targetName, panelIndex)
     const totals = await computeTotals(target.id, filter)
     return NextResponse.json({
       ok: true,
@@ -257,9 +302,13 @@ export async function POST(req: NextRequest) {
     })
   }
 
-  const { target, created } = await findOrCreateTarget(targetName)
+  const { target, created } = await findOrCreateTarget(targetName, panelIndex)
   const targetPanelCount = Math.max(1, target.panelCount ?? 1)
-  const safePanelIndex = panelIndex <= targetPanelCount ? panelIndex : 1
+  const safePanelIndex = Math.max(1, Math.min(20, panelIndex))
+
+  if (safePanelIndex > targetPanelCount) {
+    await db.update(targets).set({ panelCount: safePanelIndex }).where(eq(targets.id, target.id))
+  }
 
   await db.insert(sessions).values({
     id: uid(),

@@ -191,3 +191,29 @@ NINA → agent → app Vercel → Neon
 ```
 
 a fonctionné.
+
+## Cibles mosaïques / panneaux
+
+Les acquisitions NINA peuvent maintenant être rattachées à un panneau de mosaïque.
+
+Méthodes supportées :
+
+1. Champ explicite `panelIndex` dans le payload envoyé à `/api/nina/ingest`.
+2. Détection automatique dans le `TargetName` ou le `Filename` avec des formes comme :
+   - `M31 P2`
+   - `M31_P2_Ha_001.fits`
+   - `M31 Panel 2`
+   - `M31 panneau 2`
+   - `M31 tile 2`
+
+Si une cible existe déjà sous le nom `M31`, une acquisition NINA nommée `M31 P2` est rattachée à `M31`, panneau 2. Si le nombre de panneaux de la cible était trop petit, il est augmenté automatiquement jusqu'au panneau détecté.
+
+Tests utiles :
+
+```powershell
+python .\nina_sync_agent.py --test --test-target M31 --test-panel 1
+python .\nina_sync_agent.py --test --test-target M31 --test-panel 2
+python .\nina_sync_agent.py --test --test-target "M31 P3"
+```
+
+Attention : si NINA ne met aucune information de panneau dans le nom de cible, le nom de fichier ou les métadonnées, l'app ne peut pas l'inventer. Dans ce cas, tout est rangé dans `P1`.
