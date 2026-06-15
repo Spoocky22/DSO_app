@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   target_id TEXT NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
   panel_index INTEGER NOT NULL DEFAULT 1,
-  filter TEXT NOT NULL CHECK (filter IN ('L', 'R', 'G', 'B', 'H-alpha', 'OIII', 'SII')),
+  filter TEXT NOT NULL CHECK (filter IN ('L', 'R', 'G', 'B', 'V', 'H-alpha', 'OIII', 'SII')),
   sub_exposure INTEGER NOT NULL CHECK (sub_exposure > 0),
   sub_count INTEGER NOT NULL CHECK (sub_count > 0),
   status TEXT NOT NULL DEFAULT 'validated' CHECK (status IN ('validated', 'acquired', 'rejected')),
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS goals (
   target_id TEXT NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
-  filter TEXT NOT NULL CHECK (filter IN ('L', 'R', 'G', 'B', 'H-alpha', 'OIII', 'SII')),
+  filter TEXT NOT NULL CHECK (filter IN ('L', 'R', 'G', 'B', 'V', 'H-alpha', 'OIII', 'SII')),
   target_seconds INTEGER NOT NULL CHECK (target_seconds > 0),
   PRIMARY KEY (target_id, filter)
 );

@@ -17,7 +17,7 @@ import {
 import { TargetSelector } from "@/components/target-selector"
 import { ObjectPreview } from "@/components/object-preview"
 import { SessionForm } from "@/components/session-form"
-import { Dashboard } from "@/components/dashboard"
+import { Dashboard, GlobalDashboard } from "@/components/dashboard"
 import { ContributionList } from "@/components/contribution-list"
 import { Card } from "@/components/ui/card"
 import { Sparkles, Wifi, AlertTriangle } from "lucide-react"
@@ -190,6 +190,11 @@ export function Tracker() {
       )}
 
       <div className="space-y-6">
+        <GlobalDashboard
+          sessions={state.sessions}
+          targetCount={state.targets.length}
+        />
+
         <TargetSelector
           targets={state.targets}
           selectedId={effectiveSelectedId}

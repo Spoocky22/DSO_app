@@ -66,6 +66,42 @@ function asTrimmedString(value: unknown): string {
   return String(value ?? "").trim()
 }
 
+function firstNonEmpty(...values: unknown[]): string {
+  for (const value of values) {
+    const s = asTrimmedString(value)
+    if (s && s !== "?" && s.toLowerCase() !== "none" && s.toLowerCase() !== "null") return s
+  }
+  return ""
+}
+
+function detectFilterFromText(...values: string[]): FilterType | null {
+  const combined = values.filter(Boolean).join("/")
+  if (!combined) return null
+
+  const tokens = combined
+    .split(/[\\/\s_\-.()[\]{}]+/g)
+    .map((token) => token.trim())
+    .filter(Boolean)
+
+  // Filtres multi-caractères d'abord. Ils peuvent apparaître dans des noms
+  // de dossier/fichier sous des formes variées : Ha, H-alpha, OIII, SII, etc.
+  for (const token of tokens) {
+    const normalized = normalizeFilterName(token)
+    if (normalized && normalized !== "L" && normalized !== "R" && normalized !== "G" && normalized !== "B" && normalized !== "V") {
+      return normalized
+    }
+  }
+
+  // Puis les filtres mono-lettre. On exige un token isolé pour éviter de
+  // confondre une lettre présente dans un nom de cible avec un filtre.
+  for (const token of tokens) {
+    const normalized = normalizeFilterName(token)
+    if (normalized && ["L", "R", "G", "B", "V"].includes(normalized)) return normalized
+  }
+
+  return null
+}
+
 function parseDate(value: unknown): Date | null {
   const s = asTrimmedString(value)
   if (!s) return null
@@ -254,9 +290,25 @@ export async function POST(req: NextRequest) {
   }
 
   const stats = extractStats(payload)
-  const targetName = asTrimmedString(stats.TargetName ?? payload.targetName)
-  const rawFilter = stats.Filter ?? payload.filter
-  const filename = asTrimmedString(stats.Filename ?? payload.filename)
+  const targetName = firstNonEmpty(stats.TargetName, stats.Target, stats.ObjectName, stats.Object, payload.targetName)
+  const filename = firstNonEmpty(
+    stats.Filename,
+    stats.FileName,
+    stats.FilePath,
+    stats.Path,
+    stats.ImagePath,
+    stats.SavedFilePath,
+    payload.filename,
+  )
+  const rawFilter = firstNonEmpty(
+    stats.Filter,
+    stats.FilterName,
+    stats.FilterWheel,
+    stats.FilterWheelName,
+    stats.FilterPositionName,
+    stats.FilterInfo,
+    payload.filter,
+  )
 
   if (!targetName) {
     return NextResponse.json({ ok: false, ignored: true, reason: "No TargetName in NINA event" }, { status: 200 })
@@ -266,13 +318,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, ignored: true, reason: "Calibration frame ignored" })
   }
 
-  const filter = normalizeFilterName(rawFilter)
-  if (!filter) {
-    return NextResponse.json(
-      { ok: false, ignored: true, reason: `Unsupported filter: ${asTrimmedString(rawFilter) || "empty"}` },
-      { status: 200 },
-    )
-  }
+  const normalizedFilter = normalizeFilterName(rawFilter)
+  const detectedFilter = detectFilterFromText(filename, targetName)
+  const filter = normalizedFilter ?? detectedFilter ?? "L"
+  const filterFallback = !normalizedFilter && !detectedFilter
 
   const exposureSeconds = asPositiveNumber(stats.ExposureTime ?? payload.exposureTime ?? payload.subExposure)
   if (!exposureSeconds) {
@@ -299,6 +348,8 @@ export async function POST(req: NextRequest) {
       ...totals,
       rawFilter: formatDuration(totals.rawFilterSeconds),
       validatedFilter: formatDuration(totals.validatedFilterSeconds),
+      filterFallback,
+      originalFilter: asTrimmedString(rawFilter) || null,
     })
   }
 
@@ -349,5 +400,7 @@ export async function POST(req: NextRequest) {
     validatedTotal: formatDuration(totals.validatedTotalSeconds),
     rawFilter: formatDuration(totals.rawFilterSeconds),
     validatedFilter: formatDuration(totals.validatedFilterSeconds),
+    filterFallback,
+    originalFilter: asTrimmedString(rawFilter) || null,
   })
 }

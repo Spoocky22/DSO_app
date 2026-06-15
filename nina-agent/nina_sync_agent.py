@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -30,6 +31,7 @@ class Config:
     ntfy_server: str | None
     ntfy_topic: str | None
     ntfy_token: str | None
+    fallback_filter: str | None
 
 
 def getenv_required(name: str) -> str:
@@ -42,6 +44,9 @@ def getenv_required(name: str) -> str:
 def load_config() -> Config:
     load_dotenv()
     ntfy_topic = os.getenv("NTFY_TOPIC", "").strip() or None
+    fallback = os.getenv("NINA_FALLBACK_FILTER", "L").strip()
+    if fallback.lower() in {"", "none", "off", "false", "no"}:
+        fallback = None
     return Config(
         dso_app_url=getenv_required("DSO_APP_URL").rstrip("/"),
         ingest_token=getenv_required("NINA_INGEST_TOKEN"),
@@ -49,6 +54,7 @@ def load_config() -> Config:
         ntfy_server=(os.getenv("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/") if ntfy_topic else None),
         ntfy_topic=ntfy_topic,
         ntfy_token=os.getenv("NTFY_TOKEN", "").strip() or None,
+        fallback_filter=fallback,
     )
 
 
@@ -120,18 +126,60 @@ def extract_image_save_payload(message: str) -> dict[str, Any] | None:
     return {"Response": {"Event": "IMAGE-SAVE", "ImageStatistics": stats}}
 
 
+def first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text and text != "?" and text.lower() not in {"none", "null"}:
+            return text
+    return ""
+
+
+def stats_filter(stats: dict[str, Any]) -> str:
+    return first_non_empty(
+        stats.get("Filter"),
+        stats.get("FilterName"),
+        stats.get("FilterWheel"),
+        stats.get("FilterWheelName"),
+        stats.get("FilterPositionName"),
+        stats.get("FilterInfo"),
+    )
+
+
+def stats_filename(stats: dict[str, Any]) -> str:
+    return first_non_empty(
+        stats.get("Filename"),
+        stats.get("FileName"),
+        stats.get("FilePath"),
+        stats.get("Path"),
+        stats.get("ImagePath"),
+        stats.get("SavedFilePath"),
+    )
+
+
+def apply_filter_fallback(config: Config, payload: dict[str, Any]) -> str:
+    stats = payload["Response"]["ImageStatistics"]
+    detected_filter = stats_filter(stats)
+    if detected_filter:
+        return detected_filter
+    if config.fallback_filter:
+        payload["filter"] = config.fallback_filter
+        return config.fallback_filter
+    return "?"
+
+
 def handle_message(config: Config, message: str) -> None:
     payload = extract_image_save_payload(message)
     if payload is None:
         return
 
     stats = payload["Response"]["ImageStatistics"]
-    target = stats.get("TargetName") or "?"
-    filt = stats.get("Filter") or "?"
+    target = first_non_empty(stats.get("TargetName"), stats.get("Target"), stats.get("ObjectName"), stats.get("Object")) or "?"
+    filt = apply_filter_fallback(config, payload)
     exp = stats.get("ExposureTime") or "?"
-    filename = stats.get("Filename") or ""
+    filename = stats_filename(stats)
 
-    log(f"IMAGE-SAVE: target={target} filter={filt} exp={exp}s file={filename}")
+    fallback_note = "" if stats_filter(stats) else (" fallback" if config.fallback_filter else "")
+    log(f"IMAGE-SAVE: target={target} filter={filt}{fallback_note} exp={exp}s file={filename}")
     try:
         result = post_to_app(config, payload)
     except Exception as exc:
@@ -158,6 +206,66 @@ def handle_message(config: Config, message: str) -> None:
         notify(config, "DSO Sync NINA", msg, tags="white_check_mark,telescope")
     else:
         log(f"app returned unexpected response: {result}")
+
+
+def replay_log(config: Config, log_path: str, fallback_filter: str | None = None) -> None:
+    check_app(config)
+    path = os.path.abspath(log_path)
+    image_save_pattern = re.compile(
+        r"^(?P<date>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) IMAGE-SAVE: "
+        r"target=(?P<target>.*?) filter=(?P<filter>.*?) exp=(?P<exp>[0-9.]+)s file=(?P<file>.*)$"
+    )
+
+    total = 0
+    sent = 0
+    ignored = 0
+    failed = 0
+
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            match = image_save_pattern.match(line.strip())
+            if not match:
+                continue
+            total += 1
+            filt = match.group("filter").strip()
+            if (not filt or filt == "?") and fallback_filter:
+                filt = fallback_filter
+            elif not filt:
+                filt = "?"
+
+            payload = {
+                "targetName": match.group("target").strip(),
+                "filter": filt,
+                "exposureTime": float(match.group("exp")),
+                "subCount": 1,
+                "filename": match.group("file").strip(),
+                "capturedAt": match.group("date").replace(" ", "T") + "Z",
+            }
+            try:
+                result = post_to_app(config, payload)
+            except Exception as exc:
+                failed += 1
+                log(f"replay failed: {payload['targetName']} {payload['filter']} {payload['filename']}: {exc}")
+                continue
+
+            if result.get("duplicate"):
+                ignored += 1
+                continue
+            if result.get("ignored"):
+                ignored += 1
+                log(f"replay ignored: {payload['targetName']} {payload['filter']} {payload['filename']}: {result.get('reason')}")
+                continue
+            if result.get("ok"):
+                sent += 1
+                log(
+                    f"replay inserted: {result.get('targetName', payload['targetName'])} · "
+                    f"{result.get('filter', payload['filter'])} +{result.get('added', str(payload['exposureTime']) + 's')}"
+                )
+            else:
+                failed += 1
+                log(f"replay unexpected response: {result}")
+
+    log(f"replay summary: total IMAGE-SAVE={total}, inserted={sent}, ignored/duplicates={ignored}, failed={failed}")
 
 
 def run_test(config: Config, target_name: str, filter_name: str, exposure_time: int, panel_index: int) -> None:
@@ -231,6 +339,8 @@ def run_forever(config: Config) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sync NINA IMAGE-SAVE events to DSO Exposure Tracker")
     parser.add_argument("--test", action="store_true", help="send a fake test image to the DSO app and exit")
+    parser.add_argument("--replay-log", help="replay IMAGE-SAVE lines from an agent log file, useful after a filter/config fix")
+    parser.add_argument("--fallback-filter", help="fallback filter to use for empty-filter IMAGE-SAVE events during --replay-log; default comes from NINA_FALLBACK_FILTER, usually L")
     parser.add_argument("--test-target", default="M51", help="target name used by --test; default: M51")
     parser.add_argument("--test-filter", default="H-alpha", help="filter name used by --test; default: H-alpha")
     parser.add_argument("--test-exposure", type=int, default=300, help="exposure time in seconds used by --test; default: 300")
@@ -239,7 +349,12 @@ def main() -> int:
 
     try:
         config = load_config()
-        if args.test:
+        if args.fallback_filter:
+            config.fallback_filter = args.fallback_filter
+        if args.replay_log:
+            replay_filter = config.fallback_filter
+            replay_log(config, args.replay_log, replay_filter)
+        elif args.test:
             run_test(config, args.test_target, args.test_filter, args.test_exposure, args.test_panel)
         else:
             run_forever(config)

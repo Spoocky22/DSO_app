@@ -1,8 +1,8 @@
-export type FilterType = "L" | "R" | "G" | "B" | "H-alpha" | "OIII" | "SII"
+export type FilterType = "L" | "R" | "G" | "B" | "V" | "H-alpha" | "OIII" | "SII"
 export type SessionStatus = "validated" | "acquired" | "rejected"
 export type SessionSource = "manual" | "nina" | "import"
 
-export const FILTERS: FilterType[] = ["L", "R", "G", "B", "H-alpha", "OIII", "SII"]
+export const FILTERS: FilterType[] = ["L", "R", "G", "B", "V", "H-alpha", "OIII", "SII"]
 
 // Couleurs d'affichage par filtre (alignées sur la sémantique astro)
 export const FILTER_COLORS: Record<FilterType, string> = {
@@ -10,6 +10,7 @@ export const FILTER_COLORS: Record<FilterType, string> = {
   R: "oklch(0.65 0.2 25)",
   G: "oklch(0.75 0.16 145)",
   B: "oklch(0.68 0.15 255)",
+  V: "oklch(0.78 0.13 105)",
   "H-alpha": "oklch(0.7 0.19 20)",
   OIII: "oklch(0.78 0.13 195)",
   SII: "oklch(0.7 0.16 320)",
@@ -81,6 +82,7 @@ export function normalizeFilterName(raw: unknown): FilterType | null {
   if (["r", "red", "rouge"].includes(compact)) return "R"
   if (["g", "green", "vert", "verte"].includes(compact)) return "G"
   if (["b", "blue", "bleu", "bleue"].includes(compact)) return "B"
+  if (["v", "visual", "johnsonv", "photometricv"].includes(compact)) return "V"
   if (["ha", "halpha", "hα", "hydrogenalpha", "hydrogen-alpha"].includes(compact)) return "H-alpha"
   if (["oiii", "o3", "oxygeniii", "oxygen3"].includes(compact)) return "OIII"
   if (["sii", "s2", "sulfurii", "sulphurii", "soufreii"].includes(compact)) return "SII"

@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react"
 import {
+  FILTERS,
   FILTER_COLORS,
   formatDuration,
   panelLabel,
@@ -112,6 +113,107 @@ function FilterRecap({ title, sessions, emptyText }: { title: string; sessions: 
                     backgroundColor: FILTER_COLORS[filter],
                   }}
                 />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  )
+}
+
+
+export function GlobalDashboard({ sessions, targetCount }: { sessions: Session[]; targetCount: number }) {
+  const validatedSessions = sessions.filter((s) => s.status === "validated")
+  const rawSessions = sessions.filter((s) => s.status === "acquired")
+
+  const validatedSeconds = validatedSessions.reduce((acc, s) => acc + sessionSeconds(s), 0)
+  const rawSeconds = rawSessions.reduce((acc, s) => acc + sessionSeconds(s), 0)
+  const validatedSubs = validatedSessions.reduce((acc, s) => acc + s.subCount, 0)
+  const rawSubs = rawSessions.reduce((acc, s) => acc + s.subCount, 0)
+
+  const rows = FILTERS.map((filter) => {
+    const validated = validatedSessions
+      .filter((s) => s.filter === filter)
+      .reduce((acc, s) => acc + sessionSeconds(s), 0)
+    const raw = rawSessions
+      .filter((s) => s.filter === filter)
+      .reduce((acc, s) => acc + sessionSeconds(s), 0)
+    return { filter, validated, raw }
+  }).filter((row) => row.validated > 0 || row.raw > 0)
+
+  const maxSeconds = Math.max(...rows.map((row) => Math.max(row.validated, row.raw)), 0)
+
+  return (
+    <Card className="gap-0 p-4">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-medium tracking-wide text-muted-foreground">
+            VUE GLOBALE TOUTES CIBLES
+          </h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {targetCount} cible{targetCount > 1 ? "s" : ""} · temps validé et acquis brut séparés
+          </p>
+        </div>
+        <RadioTower className="size-4 text-primary" />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-2xl border border-border bg-background/40 p-3">
+          <p className="text-[10px] uppercase text-muted-foreground">validé / processing</p>
+          <p className="mt-1 font-mono text-2xl font-bold tabular-nums text-foreground">
+            {formatDuration(validatedSeconds)}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">{validatedSubs} poses conservées</p>
+        </div>
+        <div className="rounded-2xl border border-border bg-background/40 p-3">
+          <p className="text-[10px] uppercase text-muted-foreground">acquis NINA brut</p>
+          <p className="mt-1 font-mono text-2xl font-bold tabular-nums text-foreground">
+            {formatDuration(rawSeconds)}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">{rawSubs} poses sauvegardées</p>
+        </div>
+      </div>
+
+      {rows.length === 0 ? (
+        <p className="mt-4 py-3 text-center text-sm text-muted-foreground">
+          Aucun temps enregistré pour le moment.
+        </p>
+      ) : (
+        <div className="mt-4 space-y-3">
+          {rows.map(({ filter, validated, raw }) => (
+            <div key={filter} className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2 text-sm">
+                <span className="flex items-center gap-2 font-medium">
+                  <span
+                    className="size-2.5 rounded-full"
+                    style={{ backgroundColor: FILTER_COLORS[filter] }}
+                  />
+                  {filter}
+                </span>
+                <span className="font-mono text-xs tabular-nums text-muted-foreground">
+                  validé {formatDuration(validated)} · NINA {formatDuration(raw)}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="h-2 overflow-hidden rounded-full bg-secondary" title="Validé / processing">
+                  <div
+                    className="h-full rounded-full transition-all"
+                    style={{
+                      width: `${maxSeconds ? (validated / maxSeconds) * 100 : 0}%`,
+                      backgroundColor: FILTER_COLORS[filter],
+                    }}
+                  />
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-secondary" title="Acquis NINA brut">
+                  <div
+                    className="h-full rounded-full opacity-60 transition-all"
+                    style={{
+                      width: `${maxSeconds ? (raw / maxSeconds) * 100 : 0}%`,
+                      backgroundColor: FILTER_COLORS[filter],
+                    }}
+                  />
+                </div>
               </div>
             </div>
           ))}
