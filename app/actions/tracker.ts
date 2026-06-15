@@ -1,7 +1,7 @@
 "use server"
 
 import { db } from "@/lib/db"
-import { sessions, targets } from "@/lib/db/schema"
+import { goals, sessions, targets } from "@/lib/db/schema"
 import { asc, eq } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
 import type { AppState, FilterType, SessionStatus, SessionSource } from "@/lib/dso"
@@ -35,6 +35,9 @@ export async function getState(): Promise<AppState> {
     db.select().from(sessions).orderBy(asc(sessions.createdAt)),
   ])
 
+  const liveTargetIds = new Set(targetRows.map((t) => t.id))
+  const liveSessionRows = sessionRows.filter((s) => liveTargetIds.has(s.targetId))
+
   return {
     targets: targetRows.map((t) => ({
       id: t.id,
@@ -43,7 +46,7 @@ export async function getState(): Promise<AppState> {
       redshiftOverride: t.redshiftOverride ?? null,
       createdAt: t.createdAt.getTime(),
     })),
-    sessions: sessionRows.map((s) => ({
+    sessions: liveSessionRows.map((s) => ({
       id: s.id,
       targetId: s.targetId,
       panelIndex: s.panelIndex ?? 1,
@@ -110,7 +113,15 @@ export async function deleteSession(id: string): Promise<void> {
 
 export async function deleteTarget(id: string): Promise<void> {
   if (!id) throw new Error("Cible requise")
+
+  // Ne pas dépendre uniquement du ON DELETE CASCADE : certaines bases Neon
+  // ont pu être créées avant que la contrainte complète soit en place.
+  // On supprime donc explicitement les lignes dépendantes pour que la vue
+  // globale ne conserve jamais des sessions orphelines.
+  await db.delete(sessions).where(eq(sessions.targetId, id))
+  await db.delete(goals).where(eq(goals.targetId, id))
   await db.delete(targets).where(eq(targets.id, id))
+
   revalidatePath("/")
 }
 

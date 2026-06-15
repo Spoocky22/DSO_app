@@ -116,7 +116,15 @@ export function Tracker() {
         const nextTarget = state?.targets.find((t) => t.id !== id) ?? null
         setSelectedId(nextTarget?.id ?? null)
       }
-      await mutate()
+      await mutate(
+        (current) => current
+          ? {
+              targets: current.targets.filter((t) => t.id !== id),
+              sessions: current.sessions.filter((s) => s.targetId !== id),
+            }
+          : current,
+        { revalidate: true },
+      )
     } catch (err) {
       setActionError(readableError(err))
     }
