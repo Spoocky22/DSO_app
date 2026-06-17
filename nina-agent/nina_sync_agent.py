@@ -2,8 +2,9 @@
 """
 DSO/NINA raw acquisition sync agent.
 
-It runs on the Windows PC where N.I.N.A. is running, listens to the Advanced API
+Runs on the Windows PC where N.I.N.A. is running, listens to the Advanced API
 WebSocket IMAGE-SAVE event, and pushes each saved light frame to the DSO app.
+It can also send an end-of-night ntfy summary after a configurable idle time.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import re
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import requests
@@ -31,7 +32,49 @@ class Config:
     ntfy_server: str | None
     ntfy_topic: str | None
     ntfy_token: str | None
+    ntfy_notify_each_image: bool
+    ntfy_notify_connection: bool
+    ntfy_notify_errors: bool
+    ntfy_end_of_night_summary: bool
+    ntfy_night_idle_seconds: int
     fallback_filter: str | None
+
+
+@dataclass
+class NightFrame:
+    target_name: str
+    panel_index: int
+    filter_name: str
+    seconds: int
+    sub_count: int
+
+
+@dataclass
+class NightSummary:
+    frames: list[NightFrame] = field(default_factory=list)
+    first_activity_at: float | None = None
+    last_activity_at: float | None = None
+    summary_sent: bool = False
+
+    def record(self, frame: NightFrame, idle_seconds: int) -> None:
+        now = time.time()
+        # If a previous night was already summarized and a new frame appears long
+        # after it, start a new night summary rather than accumulating forever.
+        if self.summary_sent and self.last_activity_at and now - self.last_activity_at >= idle_seconds:
+            self.frames.clear()
+            self.first_activity_at = None
+
+        if not self.frames:
+            self.first_activity_at = now
+
+        self.frames.append(frame)
+        self.last_activity_at = now
+        self.summary_sent = False
+
+    def should_send(self, idle_seconds: int) -> bool:
+        if not self.frames or self.summary_sent or self.last_activity_at is None:
+            return False
+        return time.time() - self.last_activity_at >= idle_seconds
 
 
 def getenv_required(name: str) -> str:
@@ -41,12 +84,35 @@ def getenv_required(name: str) -> str:
     return value
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "y", "on", "oui"}:
+        return True
+    if value in {"0", "false", "no", "n", "off", "non"}:
+        return False
+    return default
+
+
+def env_int(name: str, default: int, minimum: int = 1, maximum: int | None = None) -> int:
+    try:
+        value = int(float(os.getenv(name, "").strip()))
+    except Exception:
+        value = default
+    value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
 def load_config() -> Config:
     load_dotenv()
     ntfy_topic = os.getenv("NTFY_TOPIC", "").strip() or None
     fallback = os.getenv("NINA_FALLBACK_FILTER", "L").strip()
     if fallback.lower() in {"", "none", "off", "false", "no"}:
         fallback = None
+
     return Config(
         dso_app_url=getenv_required("DSO_APP_URL").rstrip("/"),
         ingest_token=getenv_required("NINA_INGEST_TOKEN"),
@@ -54,12 +120,29 @@ def load_config() -> Config:
         ntfy_server=(os.getenv("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/") if ntfy_topic else None),
         ntfy_topic=ntfy_topic,
         ntfy_token=os.getenv("NTFY_TOKEN", "").strip() or None,
+        ntfy_notify_each_image=env_bool("NTFY_NOTIFY_EACH_IMAGE", False),
+        ntfy_notify_connection=env_bool("NTFY_NOTIFY_CONNECTION", False),
+        ntfy_notify_errors=env_bool("NTFY_NOTIFY_ERRORS", True),
+        ntfy_end_of_night_summary=env_bool("NTFY_END_OF_NIGHT_SUMMARY", True),
+        ntfy_night_idle_seconds=env_int("NTFY_NIGHT_IDLE_MINUTES", 45, minimum=5, maximum=24 * 60) * 60,
         fallback_filter=fallback,
     )
 
 
 def log(message: str) -> None:
     print(time.strftime("%Y-%m-%d %H:%M:%S"), message, flush=True)
+
+
+def format_duration(total_seconds: int | float) -> str:
+    seconds = max(0, int(round(total_seconds)))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h}h {m:02d}m" if m else f"{h}h"
+    if m > 0:
+        return f"{m}m {s:02d}s" if s else f"{m}m"
+    return f"{s}s"
 
 
 def ingest_url(config: Config) -> str:
@@ -95,7 +178,8 @@ def check_app(config: Config) -> None:
     if not resp.ok:
         raise RuntimeError(f"DSO app check failed: HTTP {resp.status_code} {resp.text}")
     log("DSO app ingest endpoint: OK")
-    notify(config, "DSO Sync", "Connexion à l'app DSO OK", tags="white_check_mark,telescope")
+    if config.ntfy_notify_connection:
+        notify(config, "DSO Sync", "Connexion à l'app DSO OK", tags="white_check_mark,telescope")
 
 
 def post_to_app(config: Config, payload: dict[str, Any]) -> dict[str, Any]:
@@ -167,7 +251,94 @@ def apply_filter_fallback(config: Config, payload: dict[str, Any]) -> str:
     return "?"
 
 
-def handle_message(config: Config, message: str) -> None:
+def record_summary_from_result(summary: NightSummary, result: dict[str, Any], fallback_target: str, fallback_filter: str, fallback_exp: Any, config: Config) -> None:
+    if not result.get("ok") or not result.get("inserted"):
+        return
+
+    try:
+        added_seconds = int(result.get("addedSeconds") or result.get("subExposure") or fallback_exp or 0)
+    except Exception:
+        added_seconds = 0
+    try:
+        sub_count = int(result.get("subCount") or 1)
+    except Exception:
+        sub_count = 1
+
+    if added_seconds <= 0:
+        return
+
+    try:
+        panel_index = int(result.get("panelIndex") or 1)
+    except Exception:
+        panel_index = 1
+
+    summary.record(
+        NightFrame(
+            target_name=str(result.get("targetName") or fallback_target or "?").strip() or "?",
+            panel_index=max(1, panel_index),
+            filter_name=str(result.get("filter") or fallback_filter or "?").strip() or "?",
+            seconds=added_seconds,
+            sub_count=max(1, sub_count),
+        ),
+        idle_seconds=config.ntfy_night_idle_seconds,
+    )
+
+
+def summarize_frames(frames: list[NightFrame]) -> str:
+    total_seconds = sum(frame.seconds for frame in frames)
+    total_subs = sum(frame.sub_count for frame in frames)
+
+    by_filter: dict[str, tuple[int, int]] = {}
+    by_target: dict[str, tuple[int, int]] = {}
+
+    for frame in frames:
+        f_seconds, f_subs = by_filter.get(frame.filter_name, (0, 0))
+        by_filter[frame.filter_name] = (f_seconds + frame.seconds, f_subs + frame.sub_count)
+
+        target_key = f"{frame.target_name} P{frame.panel_index}" if frame.panel_index > 1 else frame.target_name
+        t_seconds, t_subs = by_target.get(target_key, (0, 0))
+        by_target[target_key] = (t_seconds + frame.seconds, t_subs + frame.sub_count)
+
+    filter_lines = [
+        f"- {name}: {format_duration(seconds)} ({subs} poses)"
+        for name, (seconds, subs) in sorted(by_filter.items(), key=lambda item: item[1][0], reverse=True)
+    ]
+    target_lines = [
+        f"- {name}: {format_duration(seconds)} ({subs} poses)"
+        for name, (seconds, subs) in sorted(by_target.items(), key=lambda item: item[1][0], reverse=True)[:8]
+    ]
+
+    message = [
+        f"Total NINA brut: {format_duration(total_seconds)} ({total_subs} poses)",
+        "",
+        "Par filtre:",
+        *(filter_lines or ["- aucun filtre"]),
+    ]
+    if target_lines:
+        message.extend(["", "Par cible:", *target_lines])
+    return "\n".join(message)
+
+
+def maybe_send_idle_summary(config: Config, summary: NightSummary) -> None:
+    if not config.ntfy_end_of_night_summary or not config.ntfy_topic:
+        return
+    if not summary.should_send(config.ntfy_night_idle_seconds):
+        return
+
+    idle_minutes = config.ntfy_night_idle_seconds // 60
+    message = summarize_frames(summary.frames)
+    notify(
+        config,
+        f"DSO fin de nuit · idle {idle_minutes} min",
+        message,
+        tags="bar_chart,telescope,night_with_stars",
+        priority="4",
+    )
+    log("end-of-night ntfy summary sent")
+    summary.summary_sent = True
+
+
+def handle_message(config: Config, message: str, summary: NightSummary) -> None:
     payload = extract_image_save_payload(message)
     if payload is None:
         return
@@ -184,10 +355,11 @@ def handle_message(config: Config, message: str) -> None:
         result = post_to_app(config, payload)
     except Exception as exc:
         log(f"ingest failed: {exc}")
-        notify(config, "DSO Sync erreur", f"Import NINA impossible: {exc}", tags="warning,telescope", priority="4")
+        if config.ntfy_notify_errors:
+            notify(config, "DSO Sync erreur", f"Import NINA impossible: {exc}", tags="warning,telescope", priority="4")
         return
 
-    if result.get("ignored"):
+    if result.get("ignored") and not result.get("duplicate"):
         reason = result.get("reason", "ignored")
         log(f"ignored by app: {reason}")
         return
@@ -197,13 +369,15 @@ def handle_message(config: Config, message: str) -> None:
         return
 
     if result.get("ok"):
+        record_summary_from_result(summary, result, target, filt, exp, config)
         msg = (
             f"{result.get('targetName', target)} · {result.get('filter', filt)} +{result.get('added', str(exp) + 's')}\n"
             f"NINA brut filtre: {result.get('rawFilter', '?')}\n"
             f"Validé filtre: {result.get('validatedFilter', '?')}"
         )
         log(msg.replace("\n", " | "))
-        notify(config, "DSO Sync NINA", msg, tags="white_check_mark,telescope")
+        if config.ntfy_notify_each_image:
+            notify(config, "DSO Sync NINA", msg, tags="white_check_mark,telescope")
     else:
         log(f"app returned unexpected response: {result}")
 
@@ -228,10 +402,8 @@ def replay_log(config: Config, log_path: str, fallback_filter: str | None = None
                 continue
             total += 1
             filt = match.group("filter").strip()
-            if (not filt or filt == "?") and fallback_filter:
-                filt = fallback_filter
-            elif not filt:
-                filt = "?"
+            if not filt or filt == "?" or filt.endswith(" fallback"):
+                filt = fallback_filter or "?"
 
             payload = {
                 "targetName": match.group("target").strip(),
@@ -290,6 +462,8 @@ def run_test(config: Config, target_name: str, filter_name: str, exposure_time: 
 def run_forever(config: Config) -> None:
     check_app(config)
     stop = False
+    summary = NightSummary()
+    last_ws_error_notify_at = 0.0
 
     def on_signal(_signum: int, _frame: Any) -> None:
         nonlocal stop
@@ -300,31 +474,36 @@ def run_forever(config: Config) -> None:
 
     while not stop:
         ws: websocket.WebSocket | None = None
+        connected_once = False
         try:
             log(f"connecting to NINA websocket: {config.nina_ws_url}")
             ws = websocket.create_connection(config.nina_ws_url, timeout=10)
-            # The connection timeout above also becomes the socket read timeout.
-            # NINA may remain idle for long periods with no IMAGE-SAVE event; this
-            # must not be treated as an error. Wake up occasionally only to check
-            # whether the agent should stop.
-            ws.settimeout(300)
+            # NINA may remain idle for long periods. Use a moderate timeout only
+            # to wake up and check whether an end-of-night summary must be sent.
+            ws.settimeout(60)
+            connected_once = True
             log("NINA websocket: connected")
-            notify(config, "DSO Sync", "Connecté au WebSocket NINA", tags="satellite,telescope")
+            if config.ntfy_notify_connection:
+                notify(config, "DSO Sync", "Connecté au WebSocket NINA", tags="satellite,telescope")
 
             while not stop:
                 try:
                     message = ws.recv()
                 except websocket.WebSocketTimeoutException:
-                    # Normal idle period: no image was saved by NINA.
+                    maybe_send_idle_summary(config, summary)
                     continue
                 if isinstance(message, bytes):
                     message = message.decode("utf-8", errors="replace")
-                handle_message(config, message)
+                handle_message(config, message, summary)
+                maybe_send_idle_summary(config, summary)
         except Exception as exc:
             if stop:
                 break
             log(f"NINA websocket error: {exc}")
-            notify(config, "DSO Sync erreur", f"NINA WebSocket non joignable: {exc}", tags="warning,telescope", priority="4")
+            now = time.time()
+            if config.ntfy_notify_errors and (connected_once or now - last_ws_error_notify_at > 15 * 60):
+                notify(config, "DSO Sync erreur", f"NINA WebSocket non joignable: {exc}", tags="warning,telescope", priority="4")
+                last_ws_error_notify_at = now
             time.sleep(10)
         finally:
             if ws is not None:
@@ -333,6 +512,7 @@ def run_forever(config: Config) -> None:
                 except Exception:
                     pass
 
+    maybe_send_idle_summary(config, summary)
     log("stopped")
 
 

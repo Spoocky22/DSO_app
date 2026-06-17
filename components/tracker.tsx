@@ -18,9 +18,10 @@ import { TargetSelector } from "@/components/target-selector"
 import { ObjectPreview } from "@/components/object-preview"
 import { SessionForm } from "@/components/session-form"
 import { Dashboard, GlobalDashboard } from "@/components/dashboard"
+import { StatisticsDashboard } from "@/components/statistics-dashboard"
 import { ContributionList } from "@/components/contribution-list"
 import { Card } from "@/components/ui/card"
-import { Sparkles, Wifi, AlertTriangle } from "lucide-react"
+import { Sparkles, Wifi, AlertTriangle, BarChart3, Telescope } from "lucide-react"
 
 function readableError(error: unknown): string {
   if (error instanceof Error) return error.message
@@ -30,6 +31,7 @@ function readableError(error: unknown): string {
 
 export function Tracker() {
   const [actionError, setActionError] = useState<string | null>(null)
+  const [activeView, setActiveView] = useState<"tracker" | "stats">("tracker")
 
   const { data: state, mutate, isLoading, error } = useSWR<AppState>(
     "tracker-state",
@@ -197,44 +199,71 @@ export function Tracker() {
         </Card>
       )}
 
-      <div className="space-y-6">
-        <GlobalDashboard
-          sessions={state.sessions}
-          targetCount={state.targets.length}
-        />
-
-        <TargetSelector
-          targets={state.targets}
-          selectedId={effectiveSelectedId}
-          onSelect={setSelectedId}
-          onAdd={handleAddTarget}
-          onDelete={handleDeleteTarget}
-        />
-
-        <ObjectPreview
-          targetName={selectedTarget?.name ?? null}
-          redshiftOverride={selectedTarget?.redshiftOverride ?? null}
-          onRedshiftOverrideChange={handleUpdateTargetRedshiftOverride}
-        />
-
-        <Dashboard
-          sessions={targetSessions}
-          targetName={selectedTarget?.name ?? null}
-          panelCount={selectedTarget?.panelCount ?? 1}
-        />
-
-        <SessionForm
-          disabled={!effectiveSelectedId}
-          panelCount={selectedTarget?.panelCount ?? 1}
-          onSubmit={handleAddSession}
-        />
-
-        <ContributionList
-          sessions={targetSessions}
-          panelCount={selectedTarget?.panelCount ?? 1}
-          onDelete={handleDeleteSession}
-        />
+      <div className="mb-5 grid grid-cols-2 gap-2 rounded-2xl bg-secondary p-1">
+        <button
+          type="button"
+          onClick={() => setActiveView("tracker")}
+          className={`flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold transition ${
+            activeView === "tracker" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"
+          }`}
+        >
+          <Telescope className="size-3.5" />
+          Suivi
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveView("stats")}
+          className={`flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold transition ${
+            activeView === "stats" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"
+          }`}
+        >
+          <BarChart3 className="size-3.5" />
+          Stats
+        </button>
       </div>
+
+      {activeView === "stats" ? (
+        <StatisticsDashboard sessions={state.sessions} targets={state.targets} />
+      ) : (
+        <div className="space-y-6">
+          <GlobalDashboard
+            sessions={state.sessions}
+            targetCount={state.targets.length}
+          />
+
+          <TargetSelector
+            targets={state.targets}
+            selectedId={effectiveSelectedId}
+            onSelect={setSelectedId}
+            onAdd={handleAddTarget}
+            onDelete={handleDeleteTarget}
+          />
+
+          <ObjectPreview
+            targetName={selectedTarget?.name ?? null}
+            redshiftOverride={selectedTarget?.redshiftOverride ?? null}
+            onRedshiftOverrideChange={handleUpdateTargetRedshiftOverride}
+          />
+
+          <Dashboard
+            sessions={targetSessions}
+            targetName={selectedTarget?.name ?? null}
+            panelCount={selectedTarget?.panelCount ?? 1}
+          />
+
+          <SessionForm
+            disabled={!effectiveSelectedId}
+            panelCount={selectedTarget?.panelCount ?? 1}
+            onSubmit={handleAddSession}
+          />
+
+          <ContributionList
+            sessions={targetSessions}
+            panelCount={selectedTarget?.panelCount ?? 1}
+            onDelete={handleDeleteSession}
+          />
+        </div>
+      )}
     </main>
   )
 }
