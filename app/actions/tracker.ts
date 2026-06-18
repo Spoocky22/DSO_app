@@ -5,7 +5,7 @@ import { goals, sessions, targets } from "@/lib/db/schema"
 import { asc, eq } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
 import type { AppState, FilterType, SessionStatus, SessionSource } from "@/lib/dso"
-import { MAX_PANEL_COUNT } from "@/lib/dso"
+import { MAX_PANEL_COUNT, normalizeFilterName } from "@/lib/dso"
 
 function uid() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
@@ -50,7 +50,7 @@ export async function getState(): Promise<AppState> {
       id: s.id,
       targetId: s.targetId,
       panelIndex: s.panelIndex ?? 1,
-      filter: s.filter as FilterType,
+      filter: normalizeFilterName(s.filter) ?? "L",
       subExposure: s.subExposure,
       subCount: s.subCount,
       status: (s.status ?? "validated") as SessionStatus,
@@ -60,6 +60,9 @@ export async function getState(): Promise<AppState> {
       capturedAt: s.capturedAt ? s.capturedAt.getTime() : null,
       importedAt: s.importedAt ? s.importedAt.getTime() : null,
       createdAt: s.createdAt.getTime(),
+      hfr: s.hfr ?? null,
+      fwhm: s.fwhm ?? null,
+      sqm: s.sqm ?? null,
     })),
   }
 }

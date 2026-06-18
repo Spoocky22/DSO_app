@@ -20,6 +20,9 @@ export const sessions = pgTable("sessions", {
   externalId: text("external_id"),
   filename: text("filename"),
   capturedAt: timestamp("captured_at", { withTimezone: true }),
+  hfr: doublePrecision("hfr"),
+  fwhm: doublePrecision("fwhm"),
+  sqm: doublePrecision("sqm"),
   importedAt: timestamp("imported_at", { withTimezone: true }).notNull().defaultNow(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 })

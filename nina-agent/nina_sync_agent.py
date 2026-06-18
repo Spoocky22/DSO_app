@@ -144,6 +144,159 @@ def format_duration(total_seconds: int | float) -> str:
         return f"{m}m {s:02d}s" if s else f"{m}m"
     return f"{s}s"
 
+def normalize_filter_name(raw: Any) -> str | None:
+    value = str(raw or "").strip()
+    compact = re.sub(r"[\s_\-]+", "", value.lower())
+    if compact in {"l", "lum", "luminance", "clear", "empty", "?"}:
+        return "L"
+    if compact in {"r", "red", "rouge"}:
+        return "R"
+    if compact in {"g", "green", "vert", "verte", "v", "visual", "johnsonv", "photometricv"}:
+        return "G"
+    if compact in {"b", "blue", "bleu", "bleue"}:
+        return "B"
+    if compact in {"h", "ha", "halpha", "hα", "hydrogenalpha", "hydrogen-alpha"}:
+        return "H-alpha"
+    if compact in {"o", "oiii", "o3", "oxygen", "oxygeniii", "oxygen3"}:
+        return "OIII"
+    if compact in {"s", "sii", "s2", "sulfur", "sulfurii", "sulphur", "sulphurii", "soufre", "soufreii"}:
+        return "SII"
+    return None
+
+
+def detect_filter_from_text(*values: str) -> str | None:
+    combined = "/".join(value for value in values if value)
+    if not combined:
+        return None
+    tokens = [token for token in re.split(r"[\\/\s_\-.()[\]{}]+", combined) if token]
+
+    # Narrowband first. A single isolated O/S token in the NINA filename is a
+    # shorthand for OIII/SII in this setup.
+    for token in tokens:
+        normalized = normalize_filter_name(token)
+        if normalized and normalized not in {"L", "R", "G", "B"}:
+            return normalized
+
+    for token in tokens:
+        normalized = normalize_filter_name(token)
+        if normalized in {"L", "R", "G", "B", "OIII", "SII"}:
+            return normalized
+    return None
+
+
+def parse_loose_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    text = str(value).strip().replace(",", ".")
+    if not text or text == "?" or text.lower() == "nan":
+        return None
+    try:
+        return float(text)
+    except Exception:
+        pass
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except Exception:
+        return None
+
+
+def first_number(*values: Any) -> float | None:
+    for value in values:
+        parsed = parse_loose_number(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def numeric_from_text(label: str, *values: str) -> float | None:
+    combined = " ".join(value for value in values if value)
+    if not combined:
+        return None
+    patterns = [
+        rf"(?:^|[^A-Za-z0-9]){re.escape(label)}(?:[^0-9+\-]{{0,12}})(\d+(?:[.,]\d+)?)",
+        rf"(?:^|[^A-Za-z0-9]){re.escape(label)}[-_ ]*(\d+(?:[.,]\d+)?)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, combined, flags=re.IGNORECASE)
+        if match:
+            return parse_loose_number(match.group(1))
+    return None
+
+
+
+
+def strip_extension(path: str) -> str:
+    name = os.path.basename(str(path or ""))
+    # NINA events sometimes omit the extension. This is harmless if absent.
+    return re.sub(r"\.(?:fit|fits|xisf|tif|tiff|raw|cr2|cr3|nef|arw)$", "", name, flags=re.IGNORECASE)
+
+
+def extract_quality_from_positional_filename(filename: str) -> dict[str, float | None]:
+    """Parse NINA filename patterns ending in ..._$FRAMENR$_$HFR$_$SQM$.
+
+    Example from NINA preview:
+      M33_LIGHT_2016-01-01_12-00-00_L_-15_1600_10.21_0001_3.25_21.83
+
+    The last five fields are then expected to be:
+      exposure, frame number, HFR, SQM
+    with sensor temperature / gain just before them. We only accept the parse
+    when the frame-number field looks like an integer, to avoid misreading old
+    filenames that end with ..._EXPOSURE_FRAMENR.
+    """
+    stem = strip_extension(filename)
+    tokens = [t.strip() for t in stem.split("_") if t.strip()]
+    result: dict[str, float | None] = {"hfr": None, "fwhm": None, "sqm": None}
+    if len(tokens) < 5:
+        return result
+
+    frame_token = tokens[-3]
+    exposure_token = tokens[-4]
+    hfr_token = tokens[-2]
+    sqm_token = tokens[-1]
+
+    # Frame number is usually 0001. Exposure should be positive. These checks
+    # prevent old names like ..._B_-10.00_126_180.00_0041 from being parsed as
+    # HFR/SQM.
+    if not re.fullmatch(r"\d+", frame_token):
+        return result
+    exposure = parse_loose_number(exposure_token)
+    if exposure is None or exposure <= 0:
+        return result
+
+    hfr = parse_loose_number(hfr_token)
+    sqm = parse_loose_number(sqm_token)
+    if hfr is not None and 0 < hfr < 50:
+        result["hfr"] = hfr
+    if sqm is not None and 0 < sqm < 40:
+        result["sqm"] = sqm
+    return result
+
+def extract_quality(stats: dict[str, Any], filename: str) -> dict[str, float | None]:
+    positional = extract_quality_from_positional_filename(filename)
+    hfr = first_number(
+        stats.get("HFR"), stats.get("Hfr"), stats.get("HFD"), stats.get("Hfd"),
+        stats.get("HalfFluxRadius"), stats.get("HalfFluxDiameter"),
+        numeric_from_text("HFR", filename), numeric_from_text("HFD", filename), positional.get("hfr"),
+    )
+    fwhm = first_number(
+        stats.get("FWHM"), stats.get("Fwhm"), stats.get("StarFWHM"), stats.get("StarFwhm"),
+        stats.get("STARFWHM"), numeric_from_text("FWHM", filename), positional.get("fwhm"),
+    )
+    sqm = first_number(
+        stats.get("SQM"), stats.get("Sqm"), stats.get("SkyQuality"),
+        stats.get("SkyQualityMagnitude"), stats.get("SkyBrightness"), numeric_from_text("SQM", filename), positional.get("sqm"),
+    )
+    return {
+        "hfr": hfr if hfr is not None and hfr > 0 else None,
+        "fwhm": fwhm if fwhm is not None and fwhm > 0 else None,
+        "sqm": sqm if sqm is not None and sqm > 0 else None,
+    }
+
 
 def ingest_url(config: Config) -> str:
     return f"{config.dso_app_url}/api/nina/ingest"
@@ -242,8 +395,10 @@ def stats_filename(stats: dict[str, Any]) -> str:
 
 def apply_filter_fallback(config: Config, payload: dict[str, Any]) -> str:
     stats = payload["Response"]["ImageStatistics"]
-    detected_filter = stats_filter(stats)
+    filename = stats_filename(stats)
+    detected_filter = normalize_filter_name(stats_filter(stats)) or detect_filter_from_text(filename)
     if detected_filter:
+        payload["filter"] = detected_filter
         return detected_filter
     if config.fallback_filter:
         payload["filter"] = config.fallback_filter
@@ -348,9 +503,19 @@ def handle_message(config: Config, message: str, summary: NightSummary) -> None:
     filt = apply_filter_fallback(config, payload)
     exp = stats.get("ExposureTime") or "?"
     filename = stats_filename(stats)
+    quality = extract_quality(stats, filename)
+    if any(value is not None for value in quality.values()):
+        payload["imageQuality"] = quality
 
-    fallback_note = "" if stats_filter(stats) else (" fallback" if config.fallback_filter else "")
-    log(f"IMAGE-SAVE: target={target} filter={filt}{fallback_note} exp={exp}s file={filename}")
+    fallback_note = "" if stats_filter(stats) or detect_filter_from_text(filename) else (" fallback" if config.fallback_filter else "")
+    quality_note = ""
+    if quality.get("hfr") is not None:
+        quality_note += f" hfr={quality['hfr']:.2f}"
+    if quality.get("fwhm") is not None:
+        quality_note += f" fwhm={quality['fwhm']:.2f}"
+    if quality.get("sqm") is not None:
+        quality_note += f" sqm={quality['sqm']:.2f}"
+    log(f"IMAGE-SAVE: target={target} filter={filt}{fallback_note} exp={exp}s file={filename}{quality_note}")
     try:
         result = post_to_app(config, payload)
     except Exception as exc:
@@ -387,7 +552,7 @@ def replay_log(config: Config, log_path: str, fallback_filter: str | None = None
     path = os.path.abspath(log_path)
     image_save_pattern = re.compile(
         r"^(?P<date>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) IMAGE-SAVE: "
-        r"target=(?P<target>.*?) filter=(?P<filter>.*?) exp=(?P<exp>[0-9.]+)s file=(?P<file>.*)$"
+        r"target=(?P<target>.*?) filter=(?P<filter>.*?) exp=(?P<exp>[0-9.]+)s file=(?P<file>.*?)(?:\s+hfr=(?P<hfr>[0-9.,]+))?(?:\s+fwhm=(?P<fwhm>[0-9.,]+))?(?:\s+sqm=(?P<sqm>[0-9.,]+))?$"
     )
 
     total = 0
@@ -402,17 +567,30 @@ def replay_log(config: Config, log_path: str, fallback_filter: str | None = None
                 continue
             total += 1
             filt = match.group("filter").strip()
+            file_name = match.group("file").strip()
             if not filt or filt == "?" or filt.endswith(" fallback"):
-                filt = fallback_filter or "?"
+                filt = detect_filter_from_text(file_name) or fallback_filter or "?"
+            else:
+                filt = normalize_filter_name(filt.replace(" fallback", "")) or detect_filter_from_text(file_name) or fallback_filter or filt
+
+            quality = {
+                "hfr": parse_loose_number(match.group("hfr")),
+                "fwhm": parse_loose_number(match.group("fwhm")),
+                "sqm": parse_loose_number(match.group("sqm")),
+            }
+            if not any(value is not None and value > 0 for value in quality.values()):
+                quality = extract_quality({}, file_name)
 
             payload = {
                 "targetName": match.group("target").strip(),
                 "filter": filt,
                 "exposureTime": float(match.group("exp")),
                 "subCount": 1,
-                "filename": match.group("file").strip(),
+                "filename": file_name,
                 "capturedAt": match.group("date").replace(" ", "T") + "Z",
             }
+            if any(value is not None and value > 0 for value in quality.values()):
+                payload["imageQuality"] = quality
             try:
                 result = post_to_app(config, payload)
             except Exception as exc:

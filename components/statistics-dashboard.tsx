@@ -117,6 +117,22 @@ function targetRows(period: PeriodStats) {
     .sort((a, b) => b.seconds - a.seconds)
 }
 
+function finiteValues(values: Array<number | null | undefined>): number[] {
+  return values.filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0)
+}
+
+function meanStd(values: number[]) {
+  if (values.length === 0) return null
+  const mean = values.reduce((acc, value) => acc + value, 0) / values.length
+  const variance = values.reduce((acc, value) => acc + (value - mean) ** 2, 0) / values.length
+  return { mean, std: Math.sqrt(variance), n: values.length }
+}
+
+function formatQuality(value: { mean: number; std: number; n: number } | null, decimals = 2): string {
+  if (!value) return "—"
+  return `${value.mean.toFixed(decimals)} ± ${value.std.toFixed(decimals)}`
+}
+
 function formatDelta(seconds: number): string {
   if (seconds === 0) return "stable"
   return `${seconds > 0 ? "+" : "−"}${formatDuration(Math.abs(seconds))}`
@@ -173,10 +189,16 @@ export function StatisticsDashboard({ sessions, targets }: { sessions: Session[]
       return periods.get(keyFor(start, mode)) ?? emptyPeriod(start, mode)
     })
 
+    const currentEnd = addPeriods(currentStart, mode, 1)
+    const currentSessions = rawNinaSessions.filter((session) => {
+      const timestamp = session.capturedAt ?? session.createdAt
+      return timestamp >= currentStart.getTime() && timestamp < currentEnd.getTime()
+    })
+
     const allSeconds = rawNinaSessions.reduce((acc, session) => acc + sessionSeconds(session), 0)
     const allSubs = rawNinaSessions.reduce((acc, session) => acc + session.subCount, 0)
 
-    return { current, previous, history, allSeconds, allSubs, rawNinaSessions }
+    return { current, previous, history, allSeconds, allSubs, rawNinaSessions, currentSessions }
   }, [mode, sessions, targets])
 
   const currentFilterRows = filterRows(stats.current)
@@ -187,6 +209,13 @@ export function StatisticsDashboard({ sessions, targets }: { sessions: Session[]
   )
 
   const currentTopTargets = targetRows(stats.current).slice(0, 5)
+  const currentQualityRows = FILTERS.map((filter) => {
+    const rows = stats.currentSessions.filter((session) => session.filter === filter)
+    const hfr = meanStd(finiteValues(rows.map((session) => session.hfr)))
+    const fwhm = meanStd(finiteValues(rows.map((session) => session.fwhm)))
+    const sqm = meanStd(finiteValues(rows.map((session) => session.sqm)))
+    return { filter, rows: rows.length, hfr, fwhm, sqm }
+  }).filter((row) => row.hfr || row.fwhm || row.sqm)
   const maxHistorySeconds = Math.max(...stats.history.map((period) => period.seconds), 0)
 
   return (
@@ -325,6 +354,49 @@ export function StatisticsDashboard({ sessions, targets }: { sessions: Session[]
             })}
           </div>
         )}
+      </Card>
+
+      <Card className="gap-0 p-4">
+        <div className="mb-4 flex items-center gap-2">
+          <Sigma className="size-4 text-primary" />
+          <h2 className="text-sm font-medium tracking-wide text-muted-foreground">QUALITÉ IMAGE · PÉRIODE COURANTE</h2>
+        </div>
+        {currentQualityRows.length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            Aucun HFR/FWHM/SQM disponible sur cette période.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {currentQualityRows.map((row) => (
+              <div key={row.filter} className="rounded-2xl border border-border bg-background/40 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2 text-sm">
+                  <span className="flex items-center gap-2 font-medium">
+                    <span className="size-2.5 rounded-full" style={{ backgroundColor: FILTER_COLORS[row.filter] }} />
+                    {row.filter}
+                  </span>
+                  <span className="text-xs text-muted-foreground">{row.rows} poses</span>
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-xs">
+                  <div>
+                    <p className="text-[10px] uppercase text-muted-foreground">HFR</p>
+                    <p className="font-mono tabular-nums text-foreground">{formatQuality(row.hfr)}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] uppercase text-muted-foreground">FWHM</p>
+                    <p className="font-mono tabular-nums text-foreground">{formatQuality(row.fwhm)}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] uppercase text-muted-foreground">SQM</p>
+                    <p className="font-mono tabular-nums text-foreground">{formatQuality(row.sqm)}</p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="mt-3 text-[11px] text-muted-foreground">
+          Les statistiques sont calculées par filtre sur les valeurs fournies par NINA ou parsées depuis le nom de fichier. SQM reste vide si NINA ne fournit pas cette donnée.
+        </p>
       </Card>
 
       <Card className="gap-0 p-4">

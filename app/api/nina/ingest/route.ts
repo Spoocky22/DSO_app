@@ -17,6 +17,7 @@ type IngestPayload = {
   capturedAt?: unknown
   sourceId?: unknown
   imageStatistics?: Record<string, unknown>
+  imageQuality?: Record<string, unknown>
   Response?: {
     Event?: unknown
     ImageStatistics?: Record<string, unknown>
@@ -62,6 +63,124 @@ function asPositiveNumber(value: unknown, fallback: number | null = null): numbe
   return n
 }
 
+function parseLooseNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  if (typeof value === "number") return Number.isFinite(value) ? value : null
+  const text = String(value).trim().replace(",", ".")
+  if (!text || text === "?" || text.toLowerCase() === "nan") return null
+  const direct = Number(text)
+  if (Number.isFinite(direct)) return direct
+  const match = text.match(/\d+(?:\.\d+)?/)
+  if (!match) return null
+  const parsed = Number(match[0])
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function firstFiniteNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const n = parseLooseNumber(value)
+    if (n !== null) return n
+  }
+  return null
+}
+
+function numericFromText(label: string, ...values: string[]): number | null {
+  const combined = values.filter(Boolean).join(" ")
+  if (!combined) return null
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const patterns = [
+    new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?:[^0-9+\\-]{0,12})(\\d+(?:[.,]\\d+)?)`, "i"),
+    new RegExp(`(?:^|[^A-Za-z0-9])${escaped}[-_ ]*(\\d+(?:[.,]\\d+)?)`, "i"),
+  ]
+  for (const pattern of patterns) {
+    const match = combined.match(pattern)
+    if (match) return parseLooseNumber(match[1])
+  }
+  return null
+}
+
+
+function stripExtension(path: string): string {
+  const parts = path.split(/[\\/]/g)
+  const name = parts[parts.length - 1] ?? ""
+  return name.replace(/\.(fit|fits|xisf|tif|tiff|raw|cr2|cr3|nef|arw)$/i, "")
+}
+
+function extractQualityFromPositionalFilename(filename: string) {
+  const tokens = stripExtension(filename)
+    .split("_")
+    .map((token) => token.trim())
+    .filter(Boolean)
+
+  const empty = { hfr: null as number | null, fwhm: null as number | null, sqm: null as number | null }
+  if (tokens.length < 5) return empty
+
+  const frameToken = tokens[tokens.length - 3]
+  const exposureToken = tokens[tokens.length - 4]
+  const hfrToken = tokens[tokens.length - 2]
+  const sqmToken = tokens[tokens.length - 1]
+
+  // NINA pattern expected at the end:
+  // ..._$EXPOSURETIME$_$FRAMENR$_$HFR$_$SQM$
+  // This guard avoids misreading old filenames ending in ..._EXPOSURE_FRAMENR.
+  if (!/^\d+$/.test(frameToken)) return empty
+  const exposure = parseLooseNumber(exposureToken)
+  if (exposure === null || exposure <= 0) return empty
+
+  const hfr = parseLooseNumber(hfrToken)
+  const sqm = parseLooseNumber(sqmToken)
+  return {
+    hfr: hfr !== null && hfr > 0 && hfr < 50 ? hfr : null,
+    fwhm: null as number | null,
+    sqm: sqm !== null && sqm > 0 && sqm < 40 ? sqm : null,
+  }
+}
+
+function extractQuality(stats: Record<string, unknown>, payload: IngestPayload, filename: string) {
+  const quality = payload.imageQuality ?? {}
+  const positional = extractQualityFromPositionalFilename(filename)
+  const hfr = firstFiniteNumber(
+    stats.HFR,
+    stats.Hfr,
+    stats.HFD,
+    stats.Hfd,
+    stats.HalfFluxRadius,
+    stats.HalfFluxDiameter,
+    quality.hfr,
+    quality.HFR,
+    numericFromText("HFR", filename),
+    numericFromText("HFD", filename),
+    positional.hfr,
+  )
+  const fwhm = firstFiniteNumber(
+    stats.FWHM,
+    stats.Fwhm,
+    stats.StarFWHM,
+    stats.StarFwhm,
+    stats.STARFWHM,
+    quality.fwhm,
+    quality.FWHM,
+    numericFromText("FWHM", filename),
+    positional.fwhm,
+  )
+  const sqm = firstFiniteNumber(
+    stats.SQM,
+    stats.Sqm,
+    stats.SkyQuality,
+    stats.SkyQualityMagnitude,
+    stats.SkyBrightness,
+    quality.sqm,
+    quality.SQM,
+    numericFromText("SQM", filename),
+    positional.sqm,
+  )
+  return {
+    hfr: hfr !== null && hfr > 0 ? hfr : null,
+    fwhm: fwhm !== null && fwhm > 0 ? fwhm : null,
+    sqm: sqm !== null && sqm > 0 ? sqm : null,
+  }
+}
+
 function asTrimmedString(value: unknown): string {
   return String(value ?? "").trim()
 }
@@ -84,10 +203,10 @@ function detectFilterFromText(...values: string[]): FilterType | null {
     .filter(Boolean)
 
   // Filtres multi-caractères d'abord. Ils peuvent apparaître dans des noms
-  // de dossier/fichier sous des formes variées : Ha, H-alpha, OIII, SII, etc.
+  // de dossier/fichier sous des formes variées : Ha, H-alpha, O, OIII, S, SII, etc.
   for (const token of tokens) {
     const normalized = normalizeFilterName(token)
-    if (normalized && normalized !== "L" && normalized !== "R" && normalized !== "G" && normalized !== "B" && normalized !== "V") {
+    if (normalized && !["L", "R", "G", "B"].includes(normalized)) {
       return normalized
     }
   }
@@ -96,7 +215,7 @@ function detectFilterFromText(...values: string[]): FilterType | null {
   // confondre une lettre présente dans un nom de cible avec un filtre.
   for (const token of tokens) {
     const normalized = normalizeFilterName(token)
-    if (normalized && ["L", "R", "G", "B", "V"].includes(normalized)) return normalized
+    if (normalized && ["L", "R", "G", "B", "OIII", "SII"].includes(normalized)) return normalized
   }
 
   return null
@@ -240,7 +359,7 @@ async function computeTotals(targetId: string, filter: FilterType) {
     id: s.id,
     targetId: s.targetId,
     panelIndex: s.panelIndex ?? 1,
-    filter: s.filter as FilterType,
+    filter: normalizeFilterName(s.filter) ?? "L",
     subExposure: s.subExposure,
     subCount: s.subCount,
     status: (s.status ?? "validated") as SessionStatus,
@@ -250,6 +369,9 @@ async function computeTotals(targetId: string, filter: FilterType) {
     capturedAt: s.capturedAt ? s.capturedAt.getTime() : null,
     importedAt: s.importedAt ? s.importedAt.getTime() : null,
     createdAt: s.createdAt.getTime(),
+    hfr: s.hfr ?? null,
+    fwhm: s.fwhm ?? null,
+    sqm: s.sqm ?? null,
   })
   const sessionRows = rows.map(toSession)
 
@@ -309,6 +431,8 @@ export async function POST(req: NextRequest) {
     stats.FilterInfo,
     payload.filter,
   )
+
+  const quality = extractQuality(stats, payload, filename)
 
   if (!targetName) {
     return NextResponse.json({ ok: false, ignored: true, reason: "No TargetName in NINA event" }, { status: 200 })
@@ -373,6 +497,9 @@ export async function POST(req: NextRequest) {
     externalId,
     filename: filename || null,
     capturedAt,
+    hfr: quality.hfr,
+    fwhm: quality.fwhm,
+    sqm: quality.sqm,
     importedAt: new Date(),
     createdAt: capturedAt,
   })
@@ -402,5 +529,8 @@ export async function POST(req: NextRequest) {
     validatedFilter: formatDuration(totals.validatedFilterSeconds),
     filterFallback,
     originalFilter: asTrimmedString(rawFilter) || null,
+    hfr: quality.hfr,
+    fwhm: quality.fwhm,
+    sqm: quality.sqm,
   })
 }
