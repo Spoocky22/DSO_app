@@ -121,16 +121,20 @@ function finiteValues(values: Array<number | null | undefined>): number[] {
   return values.filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0)
 }
 
-function meanStd(values: number[]) {
+function medianStd(values: number[]) {
   if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  const median = sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
   const mean = values.reduce((acc, value) => acc + value, 0) / values.length
-  const variance = values.reduce((acc, value) => acc + (value - mean) ** 2, 0) / values.length
-  return { mean, std: Math.sqrt(variance), n: values.length }
+  const variance =
+    values.length > 1 ? values.reduce((acc, value) => acc + (value - mean) ** 2, 0) / (values.length - 1) : 0
+  return { median, std: Math.sqrt(variance), n: values.length }
 }
 
-function formatQuality(value: { mean: number; std: number; n: number } | null, decimals = 2): string {
+function formatQuality(value: { median: number; std: number; n: number } | null, decimals = 2): string {
   if (!value) return "—"
-  return `${value.mean.toFixed(decimals)} ± ${value.std.toFixed(decimals)}`
+  return `${value.median.toFixed(decimals)} ± ${value.std.toFixed(decimals)} · n=${value.n}`
 }
 
 function formatDelta(seconds: number): string {
@@ -209,13 +213,56 @@ export function StatisticsDashboard({ sessions, targets }: { sessions: Session[]
   )
 
   const currentTopTargets = targetRows(stats.current).slice(0, 5)
-  const currentQualityRows = FILTERS.map((filter) => {
-    const rows = stats.currentSessions.filter((session) => session.filter === filter)
-    const hfr = meanStd(finiteValues(rows.map((session) => session.hfr)))
-    const fwhm = meanStd(finiteValues(rows.map((session) => session.fwhm)))
-    const sqm = meanStd(finiteValues(rows.map((session) => session.sqm)))
-    return { filter, rows: rows.length, hfr, fwhm, sqm }
-  }).filter((row) => row.hfr || row.fwhm || row.sqm)
+  const targetNameById = new Map(targets.map((target) => [target.id, target.name]))
+  const qualityBuckets = new Map<
+    string,
+    {
+      target: string
+      filter: FilterType
+      seconds: number
+      poses: number
+      hfrValues: number[]
+      fwhmValues: number[]
+      sqmValues: number[]
+    }
+  >()
+
+  for (const session of stats.currentSessions) {
+    const targetName = targetNameById.get(session.targetId) ?? "Cible supprimée"
+    const targetLabel = session.panelIndex > 1 ? `${targetName} P${session.panelIndex}` : targetName
+    const key = `${targetLabel}///${session.filter}`
+    const bucket =
+      qualityBuckets.get(key) ??
+      {
+        target: targetLabel,
+        filter: session.filter,
+        seconds: 0,
+        poses: 0,
+        hfrValues: [],
+        fwhmValues: [],
+        sqmValues: [],
+      }
+
+    bucket.seconds += sessionSeconds(session)
+    bucket.poses += session.subCount
+    if (typeof session.hfr === "number" && Number.isFinite(session.hfr) && session.hfr > 0) bucket.hfrValues.push(session.hfr)
+    if (typeof session.fwhm === "number" && Number.isFinite(session.fwhm) && session.fwhm > 0) bucket.fwhmValues.push(session.fwhm)
+    if (typeof session.sqm === "number" && Number.isFinite(session.sqm) && session.sqm > 0) bucket.sqmValues.push(session.sqm)
+    qualityBuckets.set(key, bucket)
+  }
+
+  const currentQualityRows = Array.from(qualityBuckets.values())
+    .map((bucket) => ({
+      target: bucket.target,
+      filter: bucket.filter,
+      seconds: bucket.seconds,
+      poses: bucket.poses,
+      hfr: medianStd(bucket.hfrValues),
+      fwhm: medianStd(bucket.fwhmValues),
+      sqm: medianStd(bucket.sqmValues),
+    }))
+    .filter((row) => row.hfr || row.fwhm || row.sqm)
+    .sort((a, b) => b.seconds - a.seconds)
   const maxHistorySeconds = Math.max(...stats.history.map((period) => period.seconds), 0)
 
   return (
@@ -359,7 +406,7 @@ export function StatisticsDashboard({ sessions, targets }: { sessions: Session[]
       <Card className="gap-0 p-4">
         <div className="mb-4 flex items-center gap-2">
           <Sigma className="size-4 text-primary" />
-          <h2 className="text-sm font-medium tracking-wide text-muted-foreground">QUALITÉ IMAGE · PÉRIODE COURANTE</h2>
+          <h2 className="text-sm font-medium tracking-wide text-muted-foreground">QUALITÉ HFR · CIBLE / FILTRE · PÉRIODE COURANTE</h2>
         </div>
         {currentQualityRows.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">
@@ -368,13 +415,16 @@ export function StatisticsDashboard({ sessions, targets }: { sessions: Session[]
         ) : (
           <div className="space-y-3">
             {currentQualityRows.map((row) => (
-              <div key={row.filter} className="rounded-2xl border border-border bg-background/40 p-3">
+              <div key={`${row.target}-${row.filter}`} className="rounded-2xl border border-border bg-background/40 p-3">
                 <div className="mb-2 flex items-center justify-between gap-2 text-sm">
-                  <span className="flex items-center gap-2 font-medium">
-                    <span className="size-2.5 rounded-full" style={{ backgroundColor: FILTER_COLORS[row.filter] }} />
-                    {row.filter}
+                  <span className="min-w-0 font-medium">
+                    <span className="mr-2 inline-block size-2.5 rounded-full" style={{ backgroundColor: FILTER_COLORS[row.filter] }} />
+                    <span className="break-words">{row.target}</span>
+                    <span className="ml-2 rounded-full bg-secondary px-2 py-0.5 text-[11px] text-muted-foreground">{row.filter}</span>
                   </span>
-                  <span className="text-xs text-muted-foreground">{row.rows} poses</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {row.poses} poses · {formatDuration(row.seconds)}
+                  </span>
                 </div>
                 <div className="grid grid-cols-3 gap-2 text-xs">
                   <div>
@@ -395,7 +445,7 @@ export function StatisticsDashboard({ sessions, targets }: { sessions: Session[]
           </div>
         )}
         <p className="mt-3 text-[11px] text-muted-foreground">
-          Les statistiques sont calculées par filtre sur les valeurs fournies par NINA ou parsées depuis le nom de fichier. SQM reste vide si NINA ne fournit pas cette donnée.
+          HFR/FWHM/SQM sont calculés par cible et par filtre. La valeur affichée est la médiane ± σ des poses brutes NINA de la période courante. SQM reste vide si NINA ne fournit pas cette donnée.
         </p>
       </Card>
 

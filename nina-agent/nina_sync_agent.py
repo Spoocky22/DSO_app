@@ -47,6 +47,9 @@ class NightFrame:
     filter_name: str
     seconds: int
     sub_count: int
+    hfr: float | None = None
+    fwhm: float | None = None
+    sqm: float | None = None
 
 
 @dataclass
@@ -143,6 +146,32 @@ def format_duration(total_seconds: int | float) -> str:
     if m > 0:
         return f"{m}m {s:02d}s" if s else f"{m}m"
     return f"{s}s"
+
+
+def finite_quality_values(values: list[float | None]) -> list[float]:
+    return sorted(value for value in values if isinstance(value, (int, float)) and value > 0)
+
+
+def median_std(values: list[float | None]) -> tuple[float, float, int] | None:
+    cleaned = finite_quality_values(values)
+    n = len(cleaned)
+    if n == 0:
+        return None
+    mid = n // 2
+    median = cleaned[mid] if n % 2 else (cleaned[mid - 1] + cleaned[mid]) / 2
+    if n == 1:
+        sigma = 0.0
+    else:
+        mean = sum(cleaned) / n
+        sigma = (sum((value - mean) ** 2 for value in cleaned) / (n - 1)) ** 0.5
+    return median, sigma, n
+
+
+def format_median_std(value: tuple[float, float, int] | None, decimals: int = 2) -> str:
+    if value is None:
+        return "—"
+    median, sigma, n = value
+    return f"{median:.{decimals}f} ± {sigma:.{decimals}f} (n={n})"
 
 def normalize_filter_name(raw: Any) -> str | None:
     value = str(raw or "").strip()
@@ -436,6 +465,9 @@ def record_summary_from_result(summary: NightSummary, result: dict[str, Any], fa
             filter_name=str(result.get("filter") or fallback_filter or "?").strip() or "?",
             seconds=added_seconds,
             sub_count=max(1, sub_count),
+            hfr=parse_loose_number(result.get("hfr")),
+            fwhm=parse_loose_number(result.get("fwhm")),
+            sqm=parse_loose_number(result.get("sqm")),
         ),
         idle_seconds=config.ntfy_night_idle_seconds,
     )
@@ -447,6 +479,7 @@ def summarize_frames(frames: list[NightFrame]) -> str:
 
     by_filter: dict[str, tuple[int, int]] = {}
     by_target: dict[str, tuple[int, int]] = {}
+    by_target_filter: dict[tuple[str, str], dict[str, Any]] = {}
 
     for frame in frames:
         f_seconds, f_subs = by_filter.get(frame.filter_name, (0, 0))
@@ -455,6 +488,14 @@ def summarize_frames(frames: list[NightFrame]) -> str:
         target_key = f"{frame.target_name} P{frame.panel_index}" if frame.panel_index > 1 else frame.target_name
         t_seconds, t_subs = by_target.get(target_key, (0, 0))
         by_target[target_key] = (t_seconds + frame.seconds, t_subs + frame.sub_count)
+
+        tf_key = (target_key, frame.filter_name)
+        bucket = by_target_filter.setdefault(tf_key, {"seconds": 0, "subs": 0, "hfr": [], "fwhm": [], "sqm": []})
+        bucket["seconds"] += frame.seconds
+        bucket["subs"] += frame.sub_count
+        bucket["hfr"].append(frame.hfr)
+        bucket["fwhm"].append(frame.fwhm)
+        bucket["sqm"].append(frame.sqm)
 
     filter_lines = [
         f"- {name}: {format_duration(seconds)} ({subs} poses)"
@@ -465,16 +506,31 @@ def summarize_frames(frames: list[NightFrame]) -> str:
         for name, (seconds, subs) in sorted(by_target.items(), key=lambda item: item[1][0], reverse=True)[:8]
     ]
 
+    hfr_lines: list[str] = []
+    for (target_name, filter_name), bucket in sorted(
+        by_target_filter.items(), key=lambda item: item[1]["seconds"], reverse=True
+    ):
+        hfr_stats = median_std(bucket["hfr"])
+        if hfr_stats is None:
+            continue
+        hfr_lines.append(
+            f"- {target_name} / {filter_name}: HFR {format_median_std(hfr_stats)} · "
+            f"{format_duration(bucket['seconds'])}"
+        )
+        if len(hfr_lines) >= 10:
+            break
+
     message = [
         f"Total NINA brut: {format_duration(total_seconds)} ({total_subs} poses)",
         "",
         "Par filtre:",
         *(filter_lines or ["- aucun filtre"]),
     ]
+    if hfr_lines:
+        message.extend(["", "HFR médian par cible/filtre:", *hfr_lines])
     if target_lines:
         message.extend(["", "Par cible:", *target_lines])
     return "\n".join(message)
-
 
 def maybe_send_idle_summary(config: Config, summary: NightSummary) -> None:
     if not config.ntfy_end_of_night_summary or not config.ntfy_topic:
