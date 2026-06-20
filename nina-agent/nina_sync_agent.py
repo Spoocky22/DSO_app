@@ -16,6 +16,7 @@ import re
 import signal
 import sys
 import time
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,6 +39,8 @@ class Config:
     ntfy_end_of_night_summary: bool
     ntfy_night_idle_seconds: int
     fallback_filter: str | None
+    ntfy_summary_source: str
+    agent_log_path: str | None
 
 
 @dataclass
@@ -129,6 +132,8 @@ def load_config() -> Config:
         ntfy_end_of_night_summary=env_bool("NTFY_END_OF_NIGHT_SUMMARY", True),
         ntfy_night_idle_seconds=env_int("NTFY_NIGHT_IDLE_MINUTES", 45, minimum=5, maximum=24 * 60) * 60,
         fallback_filter=fallback,
+        ntfy_summary_source=os.getenv("NTFY_SUMMARY_SOURCE", "memory").strip().lower(),
+        agent_log_path=os.getenv("NINA_AGENT_LOG", "nina_agent.log").strip() or None,
     )
 
 
@@ -473,6 +478,14 @@ def record_summary_from_result(summary: NightSummary, result: dict[str, Any], fa
     )
 
 
+def target_panel_label(frame: NightFrame) -> str:
+    """Human-readable target/panel label for ntfy summaries."""
+    name = (frame.target_name or "?").strip() or "?"
+    if frame.panel_index > 1:
+        return f"{name} / P{frame.panel_index}"
+    return name
+
+
 def summarize_frames(frames: list[NightFrame]) -> str:
     total_seconds = sum(frame.seconds for frame in frames)
     total_subs = sum(frame.sub_count for frame in frames)
@@ -485,7 +498,7 @@ def summarize_frames(frames: list[NightFrame]) -> str:
         f_seconds, f_subs = by_filter.get(frame.filter_name, (0, 0))
         by_filter[frame.filter_name] = (f_seconds + frame.seconds, f_subs + frame.sub_count)
 
-        target_key = f"{frame.target_name} P{frame.panel_index}" if frame.panel_index > 1 else frame.target_name
+        target_key = target_panel_label(frame)
         t_seconds, t_subs = by_target.get(target_key, (0, 0))
         by_target[target_key] = (t_seconds + frame.seconds, t_subs + frame.sub_count)
 
@@ -514,7 +527,7 @@ def summarize_frames(frames: list[NightFrame]) -> str:
         if hfr_stats is None:
             continue
         hfr_lines.append(
-            f"- {target_name} / {filter_name}: HFR {format_median_std(hfr_stats)} · "
+            f"- {target_name} / {filter_name}: HFR {format_median_std(hfr_stats)}; "
             f"{format_duration(bucket['seconds'])}"
         )
         if len(hfr_lines) >= 10:
@@ -527,10 +540,131 @@ def summarize_frames(frames: list[NightFrame]) -> str:
         *(filter_lines or ["- aucun filtre"]),
     ]
     if hfr_lines:
-        message.extend(["", "HFR médian par cible/filtre:", *hfr_lines])
+        message.extend(["", "HFR median par cible / panneau / filtre:", *hfr_lines])
     if target_lines:
-        message.extend(["", "Par cible:", *target_lines])
+        message.extend(["", "Par cible / panneau:", *target_lines])
     return "\n".join(message)
+
+
+
+def split_target_panel_name(name: str) -> tuple[str, int]:
+    """Split labels such as 'Sh2 129 Panneau 2', 'Sh2-129 P2', 'M31 Panel 3'."""
+    raw = (name or "?").strip() or "?"
+    patterns = [
+        r"\s+(?:panneau|panel|tile)\s*(\d+)\s*$",
+        r"\s+P\s*(\d+)\s*$",
+        r"[_-]P\s*(\d+)\s*$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+        if match:
+            try:
+                panel = max(1, int(match.group(1)))
+            except Exception:
+                panel = 1
+            target = raw[: match.start()].strip(" _-/") or raw
+            return target, panel
+    return raw, 1
+
+
+def night_window_start(now: datetime | None = None, noon_hour: int = 12) -> datetime:
+    """Return the start of the current observing night using local time.
+
+    Before noon, the night started yesterday at noon. After noon, it starts
+    today at noon. This avoids mixing two successive nights in a morning report.
+    """
+    now = now or datetime.now()
+    start = now.replace(hour=noon_hour, minute=0, second=0, microsecond=0)
+    if now.hour < noon_hour:
+        start -= timedelta(days=1)
+    return start
+
+
+def parse_image_save_log_line(line: str, default_fallback_filter: str | None = "L") -> tuple[datetime, NightFrame] | None:
+    pattern = re.compile(
+        r"^(?P<date>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) IMAGE-SAVE: "
+        r"target=(?P<target>.*?) filter=(?P<filter>.*?) exp=(?P<exp>[0-9.]+)s file=(?P<file>.*?)(?:\s+hfr=(?P<hfr>[0-9.,]+))?(?:\s+fwhm=(?P<fwhm>[0-9.,]+))?(?:\s+sqm=(?P<sqm>[0-9.,]+))?$"
+    )
+    match = pattern.match(line.strip())
+    if not match:
+        return None
+    try:
+        stamp = datetime.strptime(match.group("date"), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+    target_raw = match.group("target").strip() or "?"
+    target, panel = split_target_panel_name(target_raw)
+    filename = match.group("file").strip()
+    raw_filter = (match.group("filter") or "").replace(" fallback", "").strip()
+    filter_name = normalize_filter_name(raw_filter) or detect_filter_from_text(filename) or default_fallback_filter or "?"
+    try:
+        seconds = int(round(float(match.group("exp"))))
+    except Exception:
+        seconds = 0
+    if seconds <= 0:
+        return None
+
+    quality = {
+        "hfr": parse_loose_number(match.group("hfr")),
+        "fwhm": parse_loose_number(match.group("fwhm")),
+        "sqm": parse_loose_number(match.group("sqm")),
+    }
+    if not any(value is not None and value > 0 for value in quality.values()):
+        quality = extract_quality({}, filename)
+
+    frame = NightFrame(
+        target_name=target,
+        panel_index=panel,
+        filter_name=filter_name,
+        seconds=seconds,
+        sub_count=1,
+        hfr=quality.get("hfr"),
+        fwhm=quality.get("fwhm"),
+        sqm=quality.get("sqm"),
+    )
+    return stamp, frame
+
+
+def frames_from_log(log_path: str, start: datetime | None = None, fallback_filter: str | None = "L") -> list[NightFrame]:
+    path = os.path.abspath(log_path)
+    if not os.path.exists(path):
+        return []
+    frames: list[NightFrame] = []
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            parsed = parse_image_save_log_line(line, fallback_filter)
+            if parsed is None:
+                continue
+            stamp, frame = parsed
+            if start is not None and stamp < start:
+                continue
+            frames.append(frame)
+    return frames
+
+
+def send_summary_from_log(config: Config, log_path: str, hours: int | None = None, title_suffix: str = "manuel") -> bool:
+    if not config.ntfy_topic:
+        log("summary-from-log skipped: NTFY_TOPIC is not configured")
+        return False
+    if hours is not None and hours > 0:
+        start = datetime.now() - timedelta(hours=hours)
+    else:
+        start = night_window_start()
+    frames = frames_from_log(log_path, start=start, fallback_filter=config.fallback_filter or "L")
+    if not frames:
+        log(f"summary-from-log: no IMAGE-SAVE frames found since {start:%Y-%m-%d %H:%M:%S}")
+        return False
+    message = summarize_frames(frames)
+    notify(
+        config,
+        f"DSO bilan NINA - {title_suffix}",
+        message,
+        tags="bar_chart,telescope,night_with_stars",
+        priority="4",
+    )
+    log(f"summary-from-log sent: {len(frames)} frames since {start:%Y-%m-%d %H:%M:%S}")
+    return True
 
 def maybe_send_idle_summary(config: Config, summary: NightSummary) -> None:
     if not config.ntfy_end_of_night_summary or not config.ntfy_topic:
@@ -539,10 +673,20 @@ def maybe_send_idle_summary(config: Config, summary: NightSummary) -> None:
         return
 
     idle_minutes = config.ntfy_night_idle_seconds // 60
-    message = summarize_frames(summary.frames)
+
+    # Memory is fast, but it is lost if the task/PC restarts. For a remote PC,
+    # NTFY_SUMMARY_SOURCE=log is safer because it reconstructs the night from
+    # nina_agent.log. If the log is unavailable or empty, fall back to memory.
+    frames = summary.frames
+    if config.ntfy_summary_source in {"log", "auto"} and config.agent_log_path:
+        log_frames = frames_from_log(config.agent_log_path, start=night_window_start(), fallback_filter=config.fallback_filter or "L")
+        if log_frames:
+            frames = log_frames
+
+    message = summarize_frames(frames)
     notify(
         config,
-        f"DSO fin de nuit · idle {idle_minutes} min",
+        f"DSO fin de nuit - idle {idle_minutes} min",
         message,
         tags="bar_chart,telescope,night_with_stars",
         priority="4",
@@ -755,6 +899,8 @@ def run_forever(config: Config) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Sync NINA IMAGE-SAVE events to DSO Exposure Tracker")
     parser.add_argument("--test", action="store_true", help="send a fake test image to the DSO app and exit")
+    parser.add_argument("--summary-from-log", nargs="?", const="nina_agent.log", help="send a ntfy night summary reconstructed from an agent log and exit")
+    parser.add_argument("--summary-hours", type=int, default=0, help="with --summary-from-log, summarize the last N hours instead of the current observing night")
     parser.add_argument("--replay-log", help="replay IMAGE-SAVE lines from an agent log file, useful after a filter/config fix")
     parser.add_argument("--fallback-filter", help="fallback filter to use for empty-filter IMAGE-SAVE events during --replay-log; default comes from NINA_FALLBACK_FILTER, usually L")
     parser.add_argument("--test-target", default="M51", help="target name used by --test; default: M51")
@@ -767,7 +913,9 @@ def main() -> int:
         config = load_config()
         if args.fallback_filter:
             config.fallback_filter = args.fallback_filter
-        if args.replay_log:
+        if args.summary_from_log:
+            send_summary_from_log(config, args.summary_from_log, hours=args.summary_hours or None)
+        elif args.replay_log:
             replay_filter = config.fallback_filter
             replay_log(config, args.replay_log, replay_filter)
         elif args.test:
