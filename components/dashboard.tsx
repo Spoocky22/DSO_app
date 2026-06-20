@@ -321,22 +321,47 @@ export function Dashboard({ sessions, targetName, panelCount }: Props) {
                   />
                 </div>
 
-                {panel.filters.length > 0 ? (
+                {panel.filters.length > 0 || panel.rawFilters.length > 0 ? (
                   <div className="mt-3 space-y-1.5">
-                    {panel.filters.map(([filter, seconds]) => (
-                      <div key={filter} className="flex items-center justify-between gap-2 text-[11px]">
-                        <span className="flex items-center gap-1.5 text-muted-foreground">
-                          <span
-                            className="size-2 rounded-full"
-                            style={{ backgroundColor: FILTER_COLORS[filter] }}
-                          />
-                          {filter}
-                        </span>
-                        <span className="font-mono tabular-nums text-foreground">
-                          {formatDuration(seconds)}
-                        </span>
-                      </div>
-                    ))}
+                    {Array.from(
+                      new Set([
+                        ...panel.filters.map(([filter]) => filter),
+                        ...panel.rawFilters.map(([filter]) => filter),
+                      ]),
+                    ).map((filter) => {
+                      const validatedSeconds = panel.filters.find(([f]) => f === filter)?.[1] ?? 0
+                      const rawSeconds = panel.rawFilters.find(([f]) => f === filter)?.[1] ?? 0
+
+                      return (
+                        <div key={filter} className="space-y-0.5 text-[11px]">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="flex items-center gap-1.5 text-muted-foreground">
+                              <span
+                                className="size-2 rounded-full"
+                                style={{ backgroundColor: FILTER_COLORS[filter] }}
+                              />
+                              {filter}
+                            </span>
+                          </div>
+                          {validatedSeconds > 0 ? (
+                            <div className="flex items-center justify-between gap-2 pl-3 text-[10px]">
+                              <span className="uppercase text-muted-foreground">validé</span>
+                              <span className="font-mono tabular-nums text-foreground">
+                                {formatDuration(validatedSeconds)}
+                              </span>
+                            </div>
+                          ) : null}
+                          {rawSeconds > 0 ? (
+                            <div className="flex items-center justify-between gap-2 pl-3 text-[10px]">
+                              <span className="uppercase text-muted-foreground">NINA</span>
+                              <span className="font-mono tabular-nums text-foreground">
+                                {formatDuration(rawSeconds)}
+                              </span>
+                            </div>
+                          ) : null}
+                        </div>
+                      )
+                    })}
                   </div>
                 ) : null}
               </div>
