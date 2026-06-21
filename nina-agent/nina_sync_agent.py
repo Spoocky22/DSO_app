@@ -41,6 +41,8 @@ class Config:
     fallback_filter: str | None
     ntfy_summary_source: str
     agent_log_path: str | None
+    discord_webhook_url: str | None
+    discord_username: str
 
 
 @dataclass
@@ -134,6 +136,8 @@ def load_config() -> Config:
         fallback_filter=fallback,
         ntfy_summary_source=os.getenv("NTFY_SUMMARY_SOURCE", "memory").strip().lower(),
         agent_log_path=os.getenv("NINA_AGENT_LOG", "nina_agent.log").strip() or None,
+        discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", "").strip() or None,
+        discord_username=os.getenv("DISCORD_USERNAME", "DSO Sync").strip() or "DSO Sync",
     )
 
 
@@ -343,7 +347,25 @@ def request_headers(config: Config) -> dict[str, str]:
     }
 
 
-def notify(config: Config, title: str, message: str, tags: str = "telescope", priority: str = "3") -> None:
+def _split_discord_content(text: str, max_len: int = 1900) -> list[str]:
+    """Split Discord message content without exceeding the 2000-character limit."""
+    text = text.strip()
+    if not text:
+        return []
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > max_len:
+        cut = remaining.rfind("\n", 0, max_len)
+        if cut < max_len // 2:
+            cut = max_len
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def notify_ntfy(config: Config, title: str, message: str, tags: str = "telescope", priority: str = "3") -> None:
     if not config.ntfy_topic or not config.ntfy_server:
         return
     url = f"{config.ntfy_server}/{config.ntfy_topic}"
@@ -358,6 +380,45 @@ def notify(config: Config, title: str, message: str, tags: str = "telescope", pr
         requests.post(url, headers=headers, data=message.encode("utf-8"), timeout=10)
     except Exception as exc:  # notification failure must not stop sync
         log(f"ntfy notification failed: {exc}")
+
+
+def notify_discord(config: Config, title: str, message: str, tags: str = "telescope", priority: str = "3") -> None:
+    if not config.discord_webhook_url:
+        return
+
+    # Discord accepts at most 2000 characters in content. Keep the payload simple:
+    # same text as ntfy, split over several webhook messages if needed.
+    full_message = f"**{title}**\n{message}".strip()
+    chunks = _split_discord_content(full_message)
+    if not chunks:
+        return
+
+    for index, chunk in enumerate(chunks, start=1):
+        payload = {
+            "content": chunk if len(chunks) == 1 else f"{chunk}\n\n_({index}/{len(chunks)})_",
+            "username": config.discord_username,
+            "allowed_mentions": {"parse": []},
+        }
+        try:
+            resp = requests.post(config.discord_webhook_url, json=payload, timeout=10)
+            if resp.status_code >= 400:
+                log(f"Discord notification failed: HTTP {resp.status_code} {resp.text[:200]}")
+                break
+        except Exception as exc:  # notification failure must not stop sync
+            log(f"Discord notification failed: {exc}")
+            break
+
+
+def notify(config: Config, title: str, message: str, tags: str = "telescope", priority: str = "3") -> None:
+    # One call fans out to all configured notification channels. The booleans
+    # NTFY_NOTIFY_* still control *when* notify() is called; once called, both
+    # ntfy and Discord receive the same content if configured.
+    notify_ntfy(config, title, message, tags=tags, priority=priority)
+    notify_discord(config, title, message, tags=tags, priority=priority)
+
+
+def has_notification_channel(config: Config) -> bool:
+    return bool((config.ntfy_topic and config.ntfy_server) or config.discord_webhook_url)
 
 
 def check_app(config: Config) -> None:
@@ -644,8 +705,8 @@ def frames_from_log(log_path: str, start: datetime | None = None, fallback_filte
 
 
 def send_summary_from_log(config: Config, log_path: str, hours: int | None = None, title_suffix: str = "manuel") -> bool:
-    if not config.ntfy_topic:
-        log("summary-from-log skipped: NTFY_TOPIC is not configured")
+    if not has_notification_channel(config):
+        log("summary-from-log skipped: no notification channel is configured")
         return False
     if hours is not None and hours > 0:
         start = datetime.now() - timedelta(hours=hours)
@@ -667,7 +728,7 @@ def send_summary_from_log(config: Config, log_path: str, hours: int | None = Non
     return True
 
 def maybe_send_idle_summary(config: Config, summary: NightSummary) -> None:
-    if not config.ntfy_end_of_night_summary or not config.ntfy_topic:
+    if not config.ntfy_end_of_night_summary or not has_notification_channel(config):
         return
     if not summary.should_send(config.ntfy_night_idle_seconds):
         return

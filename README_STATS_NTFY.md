@@ -81,3 +81,8 @@ C:\DSO\nina_agent\.env.example
 ```
 
 Puis redémarrer l'agent.
+
+## Discord
+
+Le même résumé peut être envoyé dans un salon Discord via webhook.
+Voir `README_DISCORD_WEBHOOK.md`.
