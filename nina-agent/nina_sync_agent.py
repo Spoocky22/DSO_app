@@ -417,10 +417,6 @@ def notify(config: Config, title: str, message: str, tags: str = "telescope", pr
     notify_discord(config, title, message, tags=tags, priority=priority)
 
 
-def has_notification_channel(config: Config) -> bool:
-    return bool((config.ntfy_topic and config.ntfy_server) or config.discord_webhook_url)
-
-
 def check_app(config: Config) -> None:
     resp = requests.get(ingest_url(config), headers=request_headers(config), timeout=15)
     if not resp.ok:
@@ -705,8 +701,8 @@ def frames_from_log(log_path: str, start: datetime | None = None, fallback_filte
 
 
 def send_summary_from_log(config: Config, log_path: str, hours: int | None = None, title_suffix: str = "manuel") -> bool:
-    if not has_notification_channel(config):
-        log("summary-from-log skipped: no notification channel is configured")
+    if not config.ntfy_topic:
+        log("summary-from-log skipped: NTFY_TOPIC is not configured")
         return False
     if hours is not None and hours > 0:
         start = datetime.now() - timedelta(hours=hours)
@@ -728,7 +724,7 @@ def send_summary_from_log(config: Config, log_path: str, hours: int | None = Non
     return True
 
 def maybe_send_idle_summary(config: Config, summary: NightSummary) -> None:
-    if not config.ntfy_end_of_night_summary or not has_notification_channel(config):
+    if not config.ntfy_end_of_night_summary or not config.ntfy_topic:
         return
     if not summary.should_send(config.ntfy_night_idle_seconds):
         return
