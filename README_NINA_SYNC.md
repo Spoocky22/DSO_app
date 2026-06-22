@@ -217,3 +217,14 @@ python .\nina_sync_agent.py --test --test-target "M31 P3"
 ```
 
 Attention : si NINA ne met aucune information de panneau dans le nom de cible, le nom de fichier ou les métadonnées, l'app ne peut pas l'inventer. Dans ce cas, tout est rangé dans `P1`.
+
+## Backfill si l'agent n'était pas lancé
+
+Si l'agent n'était pas actif pendant une nuit, mais que les fichiers FITS/XISF existent, utilise :
+
+```powershell
+cd C:\DSO\nina_agent
+.\.venv\Scripts\python.exe nina_sync_agent.py --backfill-folder "D:\DATA\M8"
+```
+
+Voir `README_NINA_BACKFILL_FOLDER.md`.

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { asc } from "drizzle-orm"
 import { db } from "@/lib/db"
 import { sessions, targets } from "@/lib/db/schema"
-import { FILTERS, formatDuration, normalizeFilterName, type FilterType } from "@/lib/dso"
+import { FILTERS, formatDuration, normalizeFilterName, sessionSeconds, type FilterType } from "@/lib/dso"
 
 export const runtime = "nodejs"
 
@@ -20,10 +20,6 @@ type SessionLike = {
 type Bucket = {
   seconds: number
   subs: number
-}
-
-function exposureSeconds(session: SessionLike): number {
-  return session.subExposure * session.subCount
 }
 
 function addToBucket(map: Map<string, Bucket>, key: string, seconds: number, subs: number) {
@@ -79,9 +75,9 @@ function buildMessage(params: {
   since: Date
 }) {
   const { allSessions, recentSessions, targetNames, since } = params
-  const allSeconds = allSessions.reduce((acc, session) => acc + exposureSeconds(session), 0)
+  const allSeconds = allSessions.reduce((acc, session) => acc + sessionSeconds(session), 0)
   const allSubs = allSessions.reduce((acc, session) => acc + session.subCount, 0)
-  const recentSeconds = recentSessions.reduce((acc, session) => acc + exposureSeconds(session), 0)
+  const recentSeconds = recentSessions.reduce((acc, session) => acc + sessionSeconds(session), 0)
   const recentSubs = recentSessions.reduce((acc, session) => acc + session.subCount, 0)
 
   const totalByFilter = new Map<string, Bucket>()
@@ -89,11 +85,11 @@ function buildMessage(params: {
   const deltaByTarget = new Map<string, Bucket>()
 
   for (const session of allSessions) {
-    addToBucket(totalByFilter, session.filter, exposureSeconds(session), session.subCount)
+    addToBucket(totalByFilter, session.filter, sessionSeconds(session), session.subCount)
   }
 
   for (const session of recentSessions) {
-    const seconds = exposureSeconds(session)
+    const seconds = sessionSeconds(session)
     addToBucket(deltaByFilter, session.filter, seconds, session.subCount)
     const baseTargetName = targetNames.get(session.targetId) ?? "Cible supprimée"
     addToBucket(deltaByTarget, `${panelTargetName(baseTargetName, session.panelIndex)} / ${session.filter}`, seconds, session.subCount)
@@ -177,7 +173,7 @@ export async function GET(req: NextRequest) {
     return changedAt.getTime() >= since.getTime()
   })
 
-  const recentSeconds = recentSessions.reduce((acc, session) => acc + exposureSeconds(session), 0)
+  const recentSeconds = recentSessions.reduce((acc, session) => acc + sessionSeconds(session), 0)
   if (recentSeconds <= 0) {
     return NextResponse.json({ ok: true, skipped: true, reason: "No new NINA exposure in the last 24h" })
   }

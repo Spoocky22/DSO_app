@@ -106,33 +106,81 @@ function stripExtension(path: string): string {
   return name.replace(/\.(fit|fits|xisf|tif|tiff|raw|cr2|cr3|nef|arw)$/i, "")
 }
 
-function extractQualityFromPositionalFilename(filename: string) {
+function extractPositionalFilenameFields(filename: string) {
   const tokens = stripExtension(filename)
     .split("_")
     .map((token) => token.trim())
     .filter(Boolean)
 
-  const empty = { hfr: null as number | null, fwhm: null as number | null, sqm: null as number | null }
-  if (tokens.length < 5) return empty
+  const empty = {
+    exposure: null as number | null,
+    frame: null as number | null,
+    hfr: null as number | null,
+    fwhm: null as number | null,
+    sqm: null as number | null,
+  }
 
-  const frameToken = tokens[tokens.length - 3]
-  const exposureToken = tokens[tokens.length - 4]
-  const hfrToken = tokens[tokens.length - 2]
-  const sqmToken = tokens[tokens.length - 1]
+  const isFrame = (token: string | undefined) => !!token && /^\d+$/.test(token)
+  const positiveNumber = (token: string | undefined) => {
+    const parsed = parseLooseNumber(token)
+    return parsed !== null && parsed > 0 ? parsed : null
+  }
 
   // NINA pattern expected at the end:
   // ..._$EXPOSURETIME$_$FRAMENR$_$HFR$_$SQM$
-  // This guard avoids misreading old filenames ending in ..._EXPOSURE_FRAMENR.
-  if (!/^\d+$/.test(frameToken)) return empty
-  const exposure = parseLooseNumber(exposureToken)
-  if (exposure === null || exposure <= 0) return empty
+  if (tokens.length >= 4 && isFrame(tokens[tokens.length - 3])) {
+    const exposure = positiveNumber(tokens[tokens.length - 4])
+    const hfr = positiveNumber(tokens[tokens.length - 2])
+    const sqm = positiveNumber(tokens[tokens.length - 1])
+    if (exposure !== null) {
+      return {
+        exposure,
+        frame: Number(tokens[tokens.length - 3]),
+        hfr: hfr !== null && hfr > 0 && hfr < 50 ? hfr : null,
+        fwhm: null as number | null,
+        sqm: sqm !== null && sqm > 0 && sqm < 40 ? sqm : null,
+      }
+    }
+  }
 
-  const hfr = parseLooseNumber(hfrToken)
-  const sqm = parseLooseNumber(sqmToken)
+  // Same pattern but SQM is empty/missing:
+  // ..._$EXPOSURETIME$_$FRAMENR$_$HFR$_
+  if (tokens.length >= 3 && isFrame(tokens[tokens.length - 2])) {
+    const exposure = positiveNumber(tokens[tokens.length - 3])
+    const hfr = positiveNumber(tokens[tokens.length - 1])
+    if (exposure !== null) {
+      return {
+        exposure,
+        frame: Number(tokens[tokens.length - 2]),
+        hfr: hfr !== null && hfr > 0 && hfr < 50 ? hfr : null,
+        fwhm: null as number | null,
+        sqm: null as number | null,
+      }
+    }
+  }
+
+  // Older pattern without quality fields:
+  // ..._$EXPOSURETIME$_$FRAMENR$
+  if (tokens.length >= 2 && isFrame(tokens[tokens.length - 1])) {
+    const exposure = positiveNumber(tokens[tokens.length - 2])
+    if (exposure !== null) {
+      return {
+        ...empty,
+        exposure,
+        frame: Number(tokens[tokens.length - 1]),
+      }
+    }
+  }
+
+  return empty
+}
+
+function extractQualityFromPositionalFilename(filename: string) {
+  const fields = extractPositionalFilenameFields(filename)
   return {
-    hfr: hfr !== null && hfr > 0 && hfr < 50 ? hfr : null,
-    fwhm: null as number | null,
-    sqm: sqm !== null && sqm > 0 && sqm < 40 ? sqm : null,
+    hfr: fields.hfr,
+    fwhm: fields.fwhm,
+    sqm: fields.sqm,
   }
 }
 

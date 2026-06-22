@@ -274,45 +274,73 @@ def strip_extension(path: str) -> str:
     return re.sub(r"\.(?:fit|fits|xisf|tif|tiff|raw|cr2|cr3|nef|arw)$", "", name, flags=re.IGNORECASE)
 
 
-def extract_quality_from_positional_filename(filename: str) -> dict[str, float | None]:
-    """Parse NINA filename patterns ending in ..._$FRAMENR$_$HFR$_$SQM$.
+def extract_positional_filename_fields(filename: str) -> dict[str, float | int | None]:
+    """Extract exposure/frame/HFR/SQM from common NINA filename endings.
 
-    Example from NINA preview:
-      M33_LIGHT_2016-01-01_12-00-00_L_-15_1600_10.21_0001_3.25_21.83
+    Supported endings:
+      ..._EXPOSURE_FRAMENR
+      ..._EXPOSURE_FRAMENR_HFR
+      ..._EXPOSURE_FRAMENR_HFR_SQM
 
-    The last five fields are then expected to be:
-      exposure, frame number, HFR, SQM
-    with sensor temperature / gain just before them. We only accept the parse
-    when the frame-number field looks like an integer, to avoid misreading old
-    filenames that end with ..._EXPOSURE_FRAMENR.
+    This matches the current GAAC/NINA pattern where the end of the filename is
+    for instance: _600.00_0000_5.60_ . Empty trailing SQM fields are tolerated.
     """
     stem = strip_extension(filename)
     tokens = [t.strip() for t in stem.split("_") if t.strip()]
-    result: dict[str, float | None] = {"hfr": None, "fwhm": None, "sqm": None}
-    if len(tokens) < 5:
-        return result
+    result: dict[str, float | int | None] = {"exposure": None, "frame": None, "hfr": None, "fwhm": None, "sqm": None}
 
-    frame_token = tokens[-3]
-    exposure_token = tokens[-4]
-    hfr_token = tokens[-2]
-    sqm_token = tokens[-1]
+    def is_frame(token: str) -> bool:
+        return bool(re.fullmatch(r"\d+", token))
 
-    # Frame number is usually 0001. Exposure should be positive. These checks
-    # prevent old names like ..._B_-10.00_126_180.00_0041 from being parsed as
-    # HFR/SQM.
-    if not re.fullmatch(r"\d+", frame_token):
-        return result
-    exposure = parse_loose_number(exposure_token)
-    if exposure is None or exposure <= 0:
-        return result
+    def positive_number(token: str) -> float | None:
+        value = parse_loose_number(token)
+        return value if value is not None and value > 0 else None
 
-    hfr = parse_loose_number(hfr_token)
-    sqm = parse_loose_number(sqm_token)
-    if hfr is not None and 0 < hfr < 50:
-        result["hfr"] = hfr
-    if sqm is not None and 0 < sqm < 40:
-        result["sqm"] = sqm
+    # Full pattern: ..._EXPOSURE_FRAMENR_HFR_SQM
+    if len(tokens) >= 4 and is_frame(tokens[-3]):
+        exposure = positive_number(tokens[-4])
+        hfr = positive_number(tokens[-2])
+        sqm = positive_number(tokens[-1])
+        if exposure is not None:
+            result["exposure"] = exposure
+            result["frame"] = int(tokens[-3])
+            if hfr is not None and 0 < hfr < 50:
+                result["hfr"] = hfr
+            if sqm is not None and 0 < sqm < 40:
+                result["sqm"] = sqm
+            return result
+
+    # Pattern without usable SQM: ..._EXPOSURE_FRAMENR_HFR
+    # Example: 2026-06-21_23-40-29_H_-10.00_126_600.00_0000_5.60_
+    if len(tokens) >= 3 and is_frame(tokens[-2]):
+        exposure = positive_number(tokens[-3])
+        hfr = positive_number(tokens[-1])
+        if exposure is not None:
+            result["exposure"] = exposure
+            result["frame"] = int(tokens[-2])
+            if hfr is not None and 0 < hfr < 50:
+                result["hfr"] = hfr
+            return result
+
+    # Older pattern without quality fields: ..._EXPOSURE_FRAMENR
+    if len(tokens) >= 2 and is_frame(tokens[-1]):
+        exposure = positive_number(tokens[-2])
+        if exposure is not None:
+            result["exposure"] = exposure
+            result["frame"] = int(tokens[-1])
+            return result
+
     return result
+
+
+def extract_quality_from_positional_filename(filename: str) -> dict[str, float | None]:
+    """Parse HFR/SQM from the positional fields at the end of NINA filenames."""
+    fields = extract_positional_filename_fields(filename)
+    return {
+        "hfr": fields.get("hfr") if isinstance(fields.get("hfr"), float) else None,
+        "fwhm": fields.get("fwhm") if isinstance(fields.get("fwhm"), float) else None,
+        "sqm": fields.get("sqm") if isinstance(fields.get("sqm"), float) else None,
+    }
 
 def extract_quality(stats: dict[str, Any], filename: str) -> dict[str, float | None]:
     positional = extract_quality_from_positional_filename(filename)
@@ -877,6 +905,161 @@ def replay_log(config: Config, log_path: str, fallback_filter: str | None = None
     log(f"replay summary: total IMAGE-SAVE={total}, inserted={sent}, ignored/duplicates={ignored}, failed={failed}")
 
 
+
+def parse_captured_at_from_filename(path: str) -> str:
+    """Return an ISO timestamp from the filename when possible, else file mtime UTC."""
+    basename = os.path.basename(path)
+    match = re.search(r"(?P<date>\d{4}-\d{2}-\d{2})[_ T](?P<time>\d{2}-\d{2}-\d{2})", basename)
+    if match:
+        date = match.group("date")
+        time_part = match.group("time").replace("-", ":")
+        return f"{date}T{time_part}Z"
+    try:
+        stamp = os.path.getmtime(path)
+    except Exception:
+        stamp = time.time()
+    return datetime.utcfromtimestamp(stamp).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def target_name_from_file(path: str, explicit_target: str | None = None) -> str:
+    if explicit_target and explicit_target.strip():
+        return explicit_target.strip()
+
+    stem = strip_extension(os.path.basename(path))
+    # NINA pattern with target at the beginning:
+    # TARGET_LIGHT_YYYY-MM-DD_HH-MM-SS_FILTER_...
+    match = re.match(r"(?P<target>.+?)_(?:LIGHT|DARK|FLAT|BIAS|DARKFLAT)_(?:\d{4}-\d{2}-\d{2})", stem, flags=re.IGNORECASE)
+    if match:
+        target = match.group("target").replace("_", " ").strip()
+        if target:
+            return target
+
+    parent = os.path.basename(os.path.dirname(os.path.abspath(path))).strip()
+    return parent or "?"
+
+
+def build_payload_from_file(path: str, explicit_target: str | None, fallback_filter: str | None) -> dict[str, Any] | None:
+    filename = os.path.basename(path)
+    target = target_name_from_file(path, explicit_target)
+
+    if is_likely_calibration_filename(filename, target):
+        return None
+
+    fields = extract_positional_filename_fields(filename)
+    exposure = fields.get("exposure")
+    if not isinstance(exposure, (int, float)) or exposure <= 0:
+        exposure = numeric_from_text("EXPOSURE", filename)
+    if not isinstance(exposure, (int, float)) or exposure <= 0:
+        log(f"backfill skipped: exposure not found in {filename}")
+        return None
+
+    detected_filter = detect_filter_from_text(filename, target) or fallback_filter or "L"
+    quality = extract_quality({}, filename)
+
+    payload: dict[str, Any] = {
+        "targetName": target,
+        "filter": detected_filter,
+        "exposureTime": float(exposure),
+        "subCount": 1,
+        "filename": filename,
+        "capturedAt": parse_captured_at_from_filename(path),
+    }
+    if any(value is not None and value > 0 for value in quality.values()):
+        payload["imageQuality"] = quality
+    return payload
+
+
+def is_likely_calibration_filename(filename: str, target_name: str = "") -> bool:
+    combined = f"{filename} {target_name}".lower()
+    return any(word in combined for word in ["bias", "dark", "flat", "darkflat", "dark-flat", "offset"])
+
+
+def iter_image_files(folder: str, recursive: bool = False) -> list[str]:
+    extensions = {".fit", ".fits", ".xisf"}
+    base = os.path.abspath(folder)
+    files: list[str] = []
+    if recursive:
+        for root, _dirs, names in os.walk(base):
+            for name in names:
+                if os.path.splitext(name)[1].lower() in extensions:
+                    files.append(os.path.join(root, name))
+    else:
+        for name in os.listdir(base):
+            path = os.path.join(base, name)
+            if os.path.isfile(path) and os.path.splitext(name)[1].lower() in extensions:
+                files.append(path)
+    return sorted(files)
+
+
+def backfill_folder(config: Config, folder: str, target_name: str | None = None, recursive: bool = False, dry_run: bool = False) -> None:
+    check_app(config)
+    path = os.path.abspath(folder)
+    if not os.path.isdir(path):
+        raise RuntimeError(f"Backfill folder not found: {path}")
+
+    files = iter_image_files(path, recursive=recursive)
+    if not files:
+        log(f"backfill: no FITS/XISF files found in {path}")
+        return
+
+    total = len(files)
+    prepared = 0
+    inserted = 0
+    duplicates = 0
+    ignored = 0
+    failed = 0
+
+    log(f"backfill: {total} image files found in {path}{' recursively' if recursive else ''}")
+    for file_path in files:
+        payload = build_payload_from_file(file_path, target_name, config.fallback_filter or "L")
+        if payload is None:
+            ignored += 1
+            continue
+        prepared += 1
+        quality = payload.get("imageQuality") or {}
+        quality_note = ""
+        if quality.get("hfr") is not None:
+            quality_note += f" hfr={quality['hfr']:.2f}"
+        if quality.get("sqm") is not None:
+            quality_note += f" sqm={quality['sqm']:.2f}"
+        log(
+            f"backfill frame: target={payload['targetName']} filter={payload['filter']} "
+            f"exp={payload['exposureTime']}s file={payload['filename']}{quality_note}"
+        )
+        if dry_run:
+            continue
+        try:
+            result = post_to_app(config, payload)
+        except Exception as exc:
+            failed += 1
+            log(f"backfill failed: {payload['filename']}: {exc}")
+            continue
+
+        if result.get("duplicate"):
+            duplicates += 1
+            continue
+        if result.get("ignored"):
+            ignored += 1
+            log(f"backfill ignored: {payload['filename']}: {result.get('reason')}")
+            continue
+        if result.get("ok"):
+            inserted += 1
+            log(
+                f"backfill inserted: {result.get('targetName', payload['targetName'])} · "
+                f"{result.get('filter', payload['filter'])} +{result.get('added', str(payload['exposureTime']) + 's')}"
+            )
+        else:
+            failed += 1
+            log(f"backfill unexpected response: {result}")
+
+    if dry_run:
+        log(f"backfill dry-run summary: found={total}, prepared={prepared}, ignored={ignored}")
+    else:
+        log(
+            f"backfill summary: found={total}, prepared={prepared}, inserted={inserted}, "
+            f"duplicates={duplicates}, ignored={ignored}, failed={failed}"
+        )
+
 def run_test(config: Config, target_name: str, filter_name: str, exposure_time: int, panel_index: int) -> None:
     check_app(config)
     safe_target = target_name.strip() or "M51"
@@ -959,6 +1142,10 @@ def main() -> int:
     parser.add_argument("--summary-from-log", nargs="?", const="nina_agent.log", help="send a ntfy night summary reconstructed from an agent log and exit")
     parser.add_argument("--summary-hours", type=int, default=0, help="with --summary-from-log, summarize the last N hours instead of the current observing night")
     parser.add_argument("--replay-log", help="replay IMAGE-SAVE lines from an agent log file, useful after a filter/config fix")
+    parser.add_argument("--backfill-folder", help="import FITS/XISF files from a folder when the agent was not running")
+    parser.add_argument("--backfill-target", help="target name to use with --backfill-folder; default: parent folder or target parsed from filename")
+    parser.add_argument("--backfill-recursive", action="store_true", help="with --backfill-folder, scan subfolders recursively")
+    parser.add_argument("--backfill-dry-run", action="store_true", help="with --backfill-folder, parse files but do not send anything")
     parser.add_argument("--fallback-filter", help="fallback filter to use for empty-filter IMAGE-SAVE events during --replay-log; default comes from NINA_FALLBACK_FILTER, usually L")
     parser.add_argument("--test-target", default="M51", help="target name used by --test; default: M51")
     parser.add_argument("--test-filter", default="H-alpha", help="filter name used by --test; default: H-alpha")
@@ -975,6 +1162,8 @@ def main() -> int:
         elif args.replay_log:
             replay_filter = config.fallback_filter
             replay_log(config, args.replay_log, replay_filter)
+        elif args.backfill_folder:
+            backfill_folder(config, args.backfill_folder, target_name=args.backfill_target, recursive=args.backfill_recursive, dry_run=args.backfill_dry_run)
         elif args.test:
             run_test(config, args.test_target, args.test_filter, args.test_exposure, args.test_panel)
         else:
